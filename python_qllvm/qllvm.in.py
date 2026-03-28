@@ -19,7 +19,9 @@ def compile(circuit,in_backend,out_backend='gasm-backend', backend_config='', ba
     elif in_backend == 'qprog':
         qasm_str = convert_qprog_to_qasm(circuit)
     elif in_backend == 'originir':
-        qasm_str = convert_originir_string_to_qprog(circuit)
+        qasm_q = convert_originir_string_to_qprog(circuit)
+        qasm_str = convert_qprog_to_qasm(qasm_q)
+
     else:
         raise ValueError(f"Backend {in_backend} not supported")
 
