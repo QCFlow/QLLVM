@@ -1,0 +1,1274 @@
+#!/usr/bin/env python3
+# OpenQASM-only build (no C++/QJIT)
+OPENQASM_ONLY_BUILD = True
+
+
+import argparse, sys, os, glob, subprocess, mimetypes, re, pathlib,time
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def info(msg):
+    print('{}[qllvm]{} {}{}'.format(bcolors.BOLD+bcolors.OKBLUE,
+                                    bcolors.ENDC+bcolors.BOLD, msg, bcolors.ENDC))
+
+def modify_qasm(file_path):
+    # read QASM file content
+    with open(file_path, 'r') as file:
+        qasm_str = file.read()
+    # print(qasm_str)
+    # 1. get the number of measurement gates
+    lines = qasm_str.split('\n')
+    qr_match = re.search(r'(?:qreg|qubit)\s+([a-zA-Z_][\w]*)\s*\[([0-9]+)\];', qasm_str)
+    cr_match = re.search(r'creg\s+([a-zA-Z_][\w]*)\s*\[([0-9]+)\];', qasm_str)
+    if not qr_match or not cr_match:
+        raise ValueError("QASM file not found qreg/qubit or creg definition")
+    qr_name = qr_match.group(1)
+    cr_name = cr_match.group(1)
+
+    measure_count = sum(1 for line in lines if 'measure' in line)
+    # 2. modify the lines containing creg
+    new_lines = []
+    for line in lines:
+        if 'creg' in line:
+            # modify the number of classical registers
+            new_line = f"creg {cr_name}[{measure_count}];"
+            new_lines.append(new_line)
+        else:
+            new_lines.append(line)
+
+    # 3. increment the number of classical registers for each measurement gate
+    creg_index = 0
+    for i, line in enumerate(new_lines):
+        measure_match = re.match(rf'measure\s+{qr_name}\[(\d+)\]\s*->\s*{cr_name}\[\d+\];', line.strip())
+        if measure_match:
+            qubit_index = measure_match.group(1)
+            new_lines[i] = f"measure {qr_name}[{qubit_index}] -> {cr_name}[{creg_index}];"
+            creg_index += 1
+    # 4. write the modified content back to the file
+    with open(file_path, 'w') as file:
+        file.write('\n'.join(new_lines))
+
+def qiskit_map(filename):
+    global initial_map
+    global connectivity_initial
+    
+    from qiskit import QuantumCircuit,transpile
+    from qiskit.transpiler import CouplingMap, Layout
+    from qiskit.transpiler.passes import SetLayout,SabreLayout,SabreSwap,FullAncillaAllocation, EnlargeWithAncilla, ApplyLayout, LookaheadSwap
+    from qiskit.transpiler import PassManager
+    from qiskit.qasm2 import dumps
+
+    with open(filename,"r")as file:
+        qasm_str = file.read()
+
+    qc_t = QuantumCircuit.from_qasm_str(qasm_str)
+    qc = transpile(qc_t,basis_gates=['rx', 'ry', 'rz', 'cz','h',"cx","x","s","t","tdg","sdg"],optimization_level=0)
+
+    # if len(data_list) < len(qc.qubits):
+    #     print("initial map error")
+    #     exit(0)
+    # print(connectivity_initial)
+
+    edges_set = set()
+    for edge in connectivity_initial:
+        if not edge or len(edge) < 2:
+            continue
+        if edge[0] == edge[1]:
+            continue
+        sorted_edge = tuple(sorted(edge))
+        edges_set.add(sorted_edge)
+
+    edges = list(sorted(edges_set))
+    connectivity = CouplingMap(edges)
+
+    graph = {i: set() for i in range(connectivity.size())}
+    for a, b in edges:
+        graph.setdefault(a, set()).add(b)
+        graph.setdefault(b, set()).add(a)
+
+    def connected_subset(start, size):
+        visited = []
+        queue = [start]
+        seen = set()
+        while queue and len(visited) < size:
+            node = queue.pop(0)
+            if node in seen:
+                continue
+            seen.add(node)
+            visited.append(node)
+            queue.extend(sorted(graph.get(node, [])))
+        return visited
+
+    components = []
+    seen = set()
+    for node in graph:
+        if node in seen:
+            continue
+        stack = [node]
+        comp = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            comp.add(cur)
+            stack.extend(graph.get(cur, []))
+        components.append(comp)
+
+    if not components:
+        raise RuntimeError("Coupling map has no connected components")
+
+    largest = max(components, key=len)
+    if len(largest) < len(qc.qubits):
+        raise RuntimeError(
+            f"Coupling map largest component size {len(largest)} is smaller than circuit qubits {len(qc.qubits)}")
+
+    start_node = min(largest)
+    allowed = connected_subset(start_node, len(qc.qubits))
+    if len(allowed) < len(qc.qubits):
+        raise RuntimeError("Failed to select a connected subset for layout")
+
+    if initial_map == "":
+        edges = [e for e in edges if e[0] in allowed and e[1] in allowed]
+        connectivity = CouplingMap(edges)
+        max_allowed = max(allowed) if allowed else -1
+        while connectivity.size() < max_allowed + 1:
+            connectivity.add_physical_qubit(connectivity.size())
+
+        layout_dict = {qc.qubits[i]: allowed[i] for i in range(len(qc.qubits))}
+        set_layout = SetLayout(Layout(layout_dict))
+    else:
+        data_list = eval(initial_map)
+        layout_dict = {}
+        for i in range(len(qc.qubits)):
+            layout_dict[qc.qubits[i]] = data_list[i]
+
+        layout = Layout(layout_dict)
+        set_layout = SetLayout(layout)
+
+    full_ancilla = FullAncillaAllocation(connectivity)
+    enlarge_ancilla = EnlargeWithAncilla()
+    apply_layout = ApplyLayout()
+
+    sabre_swap = SabreSwap(coupling_map=connectivity, heuristic="lookahead",   seed=42)
+    # lookahead_swap = LookaheadSwap(coupling_map=connectivity)
+
+    pm = PassManager([set_layout,
+        full_ancilla,
+        enlarge_ancilla,
+        apply_layout,
+        sabre_swap])
+            # lookahead_swap])
+
+    result = pm.run(qc)
+    qasm_str = dumps(result)
+
+    with open(filename,"w")as file:
+        file.write(qasm_str)
+
+    
+def check_qasm_header(file):
+
+    "check the qasm header "
+    non_empty_lines = []
+    for line in file:
+        comment_pos = line.find('//')
+        if comment_pos != -1:
+            line = line[:comment_pos]
+        stripped = line.strip()
+        if stripped:                     
+            non_empty_lines.append(stripped)
+        
+    
+    if len(non_empty_lines) >= 2 and (non_empty_lines[0] == 'OPENQASM 2.0;' or non_empty_lines[0] == 'OPENQASM 3;') and non_empty_lines[1] == 'include "qelib1.inc";':
+        return True
+
+    return False
+
+
+fatal_error_verbose = False
+initial_map = ""
+connectivity_initial =[]
+Qasmmap = False
+def main(argv=None):
+    global fatal_error_verbose
+    global initial_map
+    global connectivity_initial
+    global Qasmmap
+
+    compiler = '@CLANG_EXECUTABLE@'
+    # .o -> executable linker (use the Clang compiler by default)
+    verbose=False
+
+    if '-initial-mapping' in sys.argv[1:]:
+        map_index = sys.argv.index('-initial-mapping')
+        initial_map = sys.argv[map_index+1]
+        sys.argv.remove(initial_map)
+        sys.argv.remove('-initial-mapping')
+        if '-qpu-config' in sys.argv[1:]:
+            idx = sys.argv.index('-qpu-config')
+            config_file = sys.argv[idx+1]
+            if not os.path.exists(config_file):
+                print('Invalid qpu config file path:', config_file)
+                exit(1)
+            with open(config_file, 'r') as f:
+                content = f.read()
+
+            match = re.search(r'connectivity\s*=\s*(\[.*\])', content)
+            if match:
+                connectivity_str = match.group(1)
+                connectivity_initial = eval(connectivity_str)
+                Qasmmap = True
+                sys.argv.remove(config_file)
+                sys.argv.remove('-qpu-config')
+        else:
+            print('Invalid qpu config file path:', config_file)
+            exit(1)
+        
+    if '--verbose' in sys.argv[1:]:
+        verbose=True
+        sys.argv.remove('--verbose')
+    if '-v' in sys.argv[1:]:
+        verbose=True
+        sys.argv.remove('-v')
+
+    if '-fatal-error-verbose' in sys.argv[1:]:
+        fatal_error_verbose = True
+        sys.argv.remove('-fatal-error-verbose')
+
+    if '-h' in sys.argv[1:] or '--help' in sys.argv[1:]:
+        import argparse
+        parser = argparse.ArgumentParser(description="qllvm: quantum LLVM compiler (OpenQASM, QIR, hybrid)",
+                                     formatter_class=argparse.RawTextHelpFormatter,
+                                     fromfile_prefix_chars='@')
+        parser.add_argument('-v', metavar='',
+                        help='turn on verbose mode - prints actual compiler calls plus extra info.')
+        parser.add_argument('-fatal-error-verbose', metavar='',
+                        help='turn on verbose mode for fatal error.')
+        parser.add_argument('-qpu', metavar=('name[:backend]'), help='specify quantum backend name (e.g. qasm-backend, qir-runner).')
+        parser.add_argument('-qpu-config',help='specify file name containing backend qpu configuration.')
+        parser.add_argument('-sabre-cpp',help='use C++ SABRE mapping at LLVM IR stage instead of Qiskit (requires -initial-mapping -qpu-config with qasm-backend).')
+        parser.add_argument('-kernel',help='specify domain-specific kernel algorithm, use specific optimization methods for kernel circuits.')
+        parser.add_argument('-backend-topology',help='specify target topology for specific kernel algorithm circuit.')
+        parser.add_argument('-shots', metavar=('n_shots'), nargs=1,help='provide the number of shots to execute on shot-enabled backend.')
+        parser.add_argument('-c', metavar=('file.cpp'), help='specify compile-only, no library linking.\n$ qllvm -c src.cpp [outputs src.o for future linking]\n')
+        parser.add_argument('-o', metavar=('object.o'), help='provide the name of the object file (if compile only) or executable (if compile and link or just link).\n$ qllvm -o out.o -c src.cpp\n$ qllvm -o out.exe src.cpp\n')
+        parser.add_argument('file', help='you must specify the c++ source file name to compile.')
+        parser.add_argument('-I',action='append',nargs=1, metavar=('header_file.hpp'),help='specify additional headers to add to the include search path.')
+        parser.add_argument('-L',action='append',nargs=1,metavar=('/path/to/libs'),help='specifiy additional linker search paths.')
+        parser.add_argument('-l',action='append',nargs=1,metavar=('lib_name'),help='specifiy additional libraries to link.')
+        parser.add_argument('-opt', nargs=1, help='specify level of quantum circuit optimization (1 or 2).')
+        parser.add_argument('-print-opt-stats', metavar='', help='print circuit optimization pass statistics.')
+        parser.add_argument('-set-credentials', nargs=1, help='set api key and other credential information for remote qpu.\nMust provide at least -key KEY arguments. For IBM also specify -hub HUB -group GROUP -project PROJECT.')
+        parser.add_argument('-print-credentials', nargs=1, help='print remote api credentials for given qpu name.')
+        parser.add_argument('-update-credentials', nargs=1, help='set a specific credential for remote qpu access. Example:\nqllvm -update-credentials ibm -project MYOTHERPROJECT.')
+        parser.add_argument('-qllvm-install', metavar='', help='returns the install directory for qllvm.')
+        parser.add_argument('-pythonpath', metavar='', help='print the correct PYTHONPATH to leverage qllvm python API.')
+        parser.add_argument('-keep-llvm-file', metavar='', help='keep intermediate LLVM files.')
+        parser.add_argument('-print-final-submission', metavar='', help='print the final quantum circuit for backend submission (ignored in FTQC).')
+        parser.add_argument('-print-csp-source', metavar='', help='print the result of the Clang Syntax Handler.')
+        parser.add_argument('-install-plugin', nargs=1, help='Install the plugin at the given git repository URL. Usage -install-plugin URL.')
+        parser.add_argument('-plugin-config', nargs=1, help='Specify a specific plugin install configuration. Usage -plugin-config NAME.')
+        parser.add_argument('-circuit-state', metavar='', help='Print the circuit state(depth,the count of gates).')
+        parser.add_argument('-pass-count', metavar='', help='Print the count of every pass.')
+        parser.add_argument('-syn-opt', metavar='', help='The switch of synthesis_optimization.')
+        parser.add_argument('-pass-effect', metavar='', help='The optimization effect of pass.')
+        parser.add_argument('-customPassSequence', metavar='file.txt', help='This file stores pass sequence.Example:\n -customPassSequence=**.txt')
+        parser.add_argument('-autotuning-train', metavar='', type=int, help='generate qasm')
+        parser.add_argument('-autotuning', metavar='', type=int, help='generate qasm')
+        parser.add_argument('-rewardFunction', metavar='file.txt', help='The reward function.')
+        parser.add_argument('-genqasm', metavar='genqasm path', help='generate qasm path')
+
+        # FIXME ADD NO FAST COMPILE FLAG (TURN OFF PCH, MAINLY FOR BENCHMARK COMPARISONS)
+        
+        # Q# options to be passed to the Q# QIR generator:
+        parser.add_argument('-qs-build-exe', metavar='', help='Q# QIR generator to emit alias functions for entry points.')
+        parser.add_argument('-qs-runtime', metavar='', help='Specifies the classical capabilites of the QIR runtime. Valid options: BasicQuantumFunctionality, BasicMeasurementFeedback, FullComputation')
+        parser.add_argument('-qdk-version', metavar='', help='Specifies the Microsoft Quantum SDK version to use.')
+
+        # Flag to enable validation:
+        # Currently, it means enabling Pauli-randomized mirror circuit benchmarking:
+        # i.e., executing a set of benchmarking circuits related to the original circuit that we know the expected bitstring
+        parser.add_argument('-validate', metavar='', help='Enables backend execution validation via the mirror circuit technique.')
+        
+        parser.add_argument('-autograd', metavar='', help='Specifies the kernel autograd method. Options: central (default), forward, backward.')
+
+        args = parser.parse_args(sys.argv)
+
+    if '-version' in sys.argv[1:]:
+        print("System information")
+        print("-----------------------------------------")
+        print("Product name:    Quantum compiler and simulator")
+        print("Version:     V1.0.0")
+        print("-----------------------------------------")
+        exit(0)
+
+    if '-placement' in sys.argv[1:]:
+        sidx = sys.argv.index('-placement')
+        placementName = sys.argv[sidx+1]
+        sys.argv.remove(placementName)
+        sys.argv.remove('-placement')
+        sys.argv += ['-D__internal__qllvm__compile__placement__name=\"'+placementName+'\"']
+
+    sHandlerArgs = []
+    # Get the QPU Backend
+    accName = ''
+    qrtName = ''
+    placementName = ''
+    if '-qpu' in sys.argv[1:]:
+        config_file = ''
+        if '-qpu-config' in sys.argv[1:]:
+            idx = sys.argv.index('-qpu-config')
+            config_file = sys.argv[idx+1]
+            if not os.path.exists(config_file):
+                print('Invalid qpu config file path:', config_file)
+                exit(1)
+
+            with open(config_file, 'r') as f:
+                content = f.read()
+
+            match = re.search(r'connectivity\s*=\s*(\[.*\])', content)
+            if match:
+                connectivity_str = match.group(1)
+                connectivity_initial = eval(connectivity_str)
+                Qasmmap = True
+                sys.argv.remove(config_file)
+                sys.argv.remove('-qpu-config')
+
+
+        accidx = sys.argv.index('-qpu')
+        accName = sys.argv[accidx+1]
+        if accName not in {'qasm-backend','tianyan','originquantum','qir-runner'}:
+                print('Invalid compile command: Not support backend:', accName)
+                print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                exit(1)
+
+        sys.argv.remove(accName)
+        sys.argv.remove('-qpu')
+
+        sys.argv += ['-D__internal__qllvm__compile__backend=\"'+accName+'\"']
+        sHandlerArgs = ['-Xclang', '-plugin-arg-qllvm-args', '-Xclang', '-qpu', '-Xclang', '-plugin-arg-qllvm-args', '-Xclang', accName]
+    else:
+        accName = 'qpp'
+        sys.argv += ['-D__internal__qllvm__compile__backend=\"'+accName+'\"']
+        sHandlerArgs = ['-Xclang', '-plugin-arg-qllvm-args', '-Xclang', '-qpu', '-Xclang', '-plugin-arg-qllvm-args', '-Xclang', accName]
+
+    # Get the shots if necessary
+    Shots = 0
+    if '-shots' in sys.argv[1:]:
+        sidx = sys.argv.index('-shots')
+        Shots = sys.argv[sidx+1]
+        sys.argv.remove(Shots)
+        sys.argv.remove('-shots')
+        sys.argv += ['-D__internal__qllvm__compile__shots=\"'+str(Shots)+'\"']
+        sHandlerArgs += ['-Xclang', '-plugin-arg-qllvm-args', '-Xclang', '-shots', '-Xclang', '-plugin-arg-qllvm-args', '-Xclang', Shots]
+
+    # Optimization level for flattened (runtime) kernel
+    # Default: 0 (no optimization)
+    qrtOptLevel = 0
+    if '-opt' in sys.argv[1:]:
+        sidx = sys.argv.index('-opt')
+        qrtOptLevel = sys.argv[sidx+1]
+        sys.argv.remove(qrtOptLevel)
+        sys.argv.remove('-opt')
+        sys.argv += ['-D__internal__qllvm__compile__opt__level='+qrtOptLevel]
+
+    # Parse qubit mapping:
+    if '-qubit-map' in sys.argv[1:]:
+        sidx = sys.argv.index('-qubit-map')
+        qubitMap = sys.argv[sidx+1]
+        sys.argv.remove(qubitMap)
+        sys.argv.remove('-qubit-map')
+        sys.argv += ['-D__internal__qllvm__compile__qubit__map=\"'+qubitMap+'\"']
+
+
+    # Define the QRT, e.g. "nisq" or "ftqc"
+    if '-qrt' in sys.argv[1:]:
+        sidx = sys.argv.index('-qrt')
+        qrtName = sys.argv[sidx+1]
+        if qrtName != 'nisq':
+            print('Invalid compile command: Currently -qrt only support nisq')
+            print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+            exit(1)
+        sys.argv.remove(qrtName)
+        sys.argv.remove('-qrt')
+        sys.argv += ['-D__internal__qllvm__compile__qrt__mode=\"'+qrtName+'\"']   
+        if qrtName == 'ftqc': 
+            sys.argv += ['-D_QLLVM_FTQC_RUNTIME']
+    
+
+    # Get the filename we are compiling or the object file
+    filename = ''
+    fileType = ''
+        # Phase 1: Hybrid compilation with qir-runner as simulator
+    def compile_hybrid_qir_runner(cpp_files, qasm_files, output_exe=None):
+        """Compile C++ + QASM to exe that spawns qir-runner for quantum simulation."""
+        # Use g++ for C++/stub when available (~10x faster than clang on Debug builds)
+        _shutil = __import__('shutil')
+        cxx_compiler = _shutil.which('g++') or _shutil.which('gcc') or compiler
+        llvm_bin_path = str(pathlib.Path(compiler).parent)
+        qllvm_tool = '@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile'
+        build_base = None
+        if not os.path.exists(qllvm_tool):
+            for base in [os.getcwd(), os.path.dirname(os.getcwd())]:
+                build_tool = os.path.join(base, 'build', 'bin', 'qllvm-compile')
+                if os.path.exists(build_tool):
+                    qllvm_tool = build_tool
+                    build_base = os.path.join(base, 'build')
+                    break
+        run_env = os.environ.copy()
+        if build_base:
+            lib_paths = [os.path.join(build_base, 'lib'), os.path.join(build_base, 'mlir', 'parsers', 'qiskit'),
+                        os.path.join(build_base, 'mlir', 'parsers', 'qasm3'), os.path.join(build_base, 'mlir', 'dialect')]
+            run_env['LD_LIBRARY_PATH'] = ':'.join(lib_paths) + (':' + run_env.get('LD_LIBRARY_PATH', ''))
+        work_dir = os.getcwd()
+        _qir_rt_inc = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm', '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+        shots = 1024
+        if '-shots' in sys.argv[1:]:
+            idx = sys.argv.index('-shots') + 1
+            if idx < len(sys.argv):
+                try:
+                    shots = int(sys.argv[idx])
+                except ValueError:
+                    pass
+
+        # 1. Compile each QASM to .bc (qir-runner backend)
+        bc_files = []
+        for qasm_file in qasm_files:
+            base = os.path.splitext(os.path.basename(qasm_file))[0]
+            bc_path = os.path.join(work_dir, base + '.bc')
+            preproc_cmd = [cxx_compiler, '-x', 'c++', '-E', '-P', qasm_file]
+            try:
+                result = subprocess.check_output(preproc_cmd).decode('ascii')
+            except Exception:
+                result = open(qasm_file, 'r').read()
+            if os.path.splitext(qasm_file)[1] == '.qasm':
+                filter_lines = [line for line in result.split('\n')
+                    if 'OPENQASM' not in line and len(line) > 0]
+                text = 'OPENQASM 3;\n' + '\n'.join(filter_lines)
+            else:
+                text = result
+            tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
+            with open(tmp_qasm, 'w') as f:
+                f.write(text)
+            cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
+                   '-emit-backend=qir-runner', '-output-path=' + bc_path]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True, env=run_env)
+            os.remove(tmp_qasm)
+            bc_files.append((base, bc_path))
+
+        # 2. Generate kernel stubs that call qir_runner_execute
+        stub_cpp = os.path.join(work_dir, '__qir_runner_kernels.cpp')
+        with open(stub_cpp, 'w') as f:
+            f.write('/* Auto-generated kernel stubs for qir-runner hybrid */\n')
+            f.write('extern "C" void qir_runner_execute(const char* kernel_name, int shots);\n\n')
+            for base, _ in bc_files:
+                f.write('extern "C" void __internal_mlir_{}() {{\n'.format(base))
+                f.write('  qir_runner_execute("{}", 0);\n'.format(base))  # 0 = use default from argv
+                f.write('}\n\n')
+        stub_o = os.path.join(work_dir, '__qir_runner_kernels.o')
+
+        # 3. Compile C++ sources (use g++ when available for ~10x faster compile)
+        cpp_objs = []
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            o_path = os.path.join(work_dir, base + '_classical.o')
+            cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc + ['-o', o_path, cpp_file]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cpp_objs.append(o_path)
+
+        # 4. Compile kernel stubs
+        cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc + ['-o', stub_o, stub_cpp]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True)
+
+        # 5. Link
+        exe_name = output_exe if output_exe else 'hybrid_app'
+        lib_dir = '@CMAKE_INSTALL_PREFIX@/lib'
+        runtime_a = None
+        for cand in [
+            os.path.join(build_base or '', 'mlir', 'qir_runner_runtime', 'libqir-runner-runtime.a'),
+            os.path.join(lib_dir, 'libqir-runner-runtime.a'),
+            os.path.join(os.path.expanduser('~'), '.qllvm', 'lib', 'libqir-runner-runtime.a'),
+        ]:
+            if cand and os.path.exists(cand):
+                runtime_a = cand
+                break
+        if not runtime_a:
+            raise FileNotFoundError('libqir-runner-runtime.a not found. Build qllvm with ninja install.')
+        link_cmd = [cxx_compiler, '-o', exe_name] + cpp_objs + [stub_o, runtime_a]
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        # 6. Pass -shots via wrapper or document; .bc files stay in cwd
+        for f in [stub_cpp, stub_o] + cpp_objs:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid (qir-runner) executable: {}. Run with: {} -shots {}'.format(exe_name, exe_name, shots))
+        return exe_name
+
+    # Phase 1: C++ + CUDA + QASM hybrid compilation (qir-runner for quantum)
+    def compile_hybrid_cuda_quantum(cpp_files, cu_files, qasm_files, output_exe=None):
+        """Compile C++ + CUDA + QASM to exe: CUDA kernels + qir-runner for quantum."""
+        _shutil = __import__('shutil')
+        cxx_compiler = _shutil.which('g++') or _shutil.which('gcc') or compiler
+        llvm_bin_path = str(pathlib.Path(compiler).parent)
+        qllvm_tool = '@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile'
+        build_base = None
+        if not os.path.exists(qllvm_tool):
+            for base in [os.getcwd(), os.path.dirname(os.getcwd())]:
+                build_tool = os.path.join(base, 'build', 'bin', 'qllvm-compile')
+                if os.path.exists(build_tool):
+                    qllvm_tool = build_tool
+                    build_base = os.path.join(base, 'build')
+                    break
+        run_env = os.environ.copy()
+        if build_base:
+            lib_paths = [os.path.join(build_base, 'lib'), os.path.join(build_base, 'mlir', 'parsers', 'qiskit'),
+                        os.path.join(build_base, 'mlir', 'parsers', 'qasm3'), os.path.join(build_base, 'mlir', 'dialect')]
+            run_env['LD_LIBRARY_PATH'] = ':'.join(lib_paths) + (':' + run_env.get('LD_LIBRARY_PATH', ''))
+        work_dir = os.getcwd()
+        _qir_rt_inc_cuda = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm', '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+
+        # Parse CUDA options
+        cuda_arch = 'sm_75'
+        if '-cuda-arch' in sys.argv[1:]:
+            idx = sys.argv.index('-cuda-arch') + 1
+            if idx < len(sys.argv):
+                cuda_arch = sys.argv[idx]
+        cuda_path = os.environ.get('CUDA_PATH', '')
+        if '-cuda-path' in sys.argv[1:]:
+            idx = sys.argv.index('-cuda-path') + 1
+            if idx < len(sys.argv):
+                cuda_path = sys.argv[idx]
+        if not cuda_path:
+            cuda_path = '/usr/local/cuda'
+        # 未显式指定时：apt 安装的 CUDA 布局与 Clang 不符，优先用 install_cuda_apt.sh 创建的兼容层
+        apt_compat = os.path.join(os.path.expanduser('~'), '.qllvm', 'cuda-apt-compat')
+        if not cuda_path or cuda_path == '/usr' or not os.path.isdir(cuda_path):
+            if os.path.isdir(apt_compat):
+                cuda_path = apt_compat
+        if not os.path.isdir(cuda_path):
+            nvcc = _shutil.which('nvcc')
+            if nvcc:
+                cuda_path = os.path.dirname(os.path.dirname(nvcc))
+            if not os.path.isdir(cuda_path):
+                raise FileNotFoundError('CUDA path not found: {}. Set CUDA_PATH or use -cuda-path.'.format(cuda_path))
+
+        # 1. Compile .cu -> .o (优先 nvcc，clang -x cuda 在 apt 环境下易有 include 问题)
+        cu_objs = []
+        nvcc_path = _shutil.which('nvcc')
+        for cu_file in cu_files:
+            base = os.path.splitext(os.path.basename(cu_file))[0]
+            o_path = os.path.join(work_dir, base + '_cuda.o')
+            if nvcc_path:
+                cmd = [nvcc_path, '-x', 'cu', '-c', cu_file, '-o', o_path, '-arch=' + cuda_arch]
+            else:
+                cmd = [compiler, '-x', 'cuda', '-c', cu_file, '-o', o_path,
+                       '--cuda-gpu-arch=' + cuda_arch, '--cuda-path=' + cuda_path, '-I/usr/include']
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cu_objs.append(o_path)
+
+        # 2. Compile .cpp -> .o
+        cpp_objs = []
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            o_path = os.path.join(work_dir, base + '_classical.o')
+            cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc_cuda + ['-o', o_path, cpp_file]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cpp_objs.append(o_path)
+
+        # 3. Compile QASM -> .bc and generate stubs (qir-runner path)
+        bc_files = []
+        for qasm_file in qasm_files:
+            base = os.path.splitext(os.path.basename(qasm_file))[0]
+            bc_path = os.path.join(work_dir, base + '.bc')
+            preproc_cmd = [cxx_compiler, '-x', 'c++', '-E', '-P', qasm_file]
+            try:
+                result = subprocess.check_output(preproc_cmd).decode('ascii')
+            except Exception:
+                result = open(qasm_file, 'r').read()
+            if os.path.splitext(qasm_file)[1] == '.qasm':
+                filter_lines = [line for line in result.split('\n')
+                    if 'OPENQASM' not in line and len(line) > 0]
+                text = 'OPENQASM 3;\n' + '\n'.join(filter_lines)
+            else:
+                text = result
+            tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
+            with open(tmp_qasm, 'w') as f:
+                f.write(text)
+            cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
+                   '-emit-backend=qir-runner', '-output-path=' + bc_path]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True, env=run_env)
+            os.remove(tmp_qasm)
+            bc_files.append((base, bc_path))
+
+        # 4. Generate kernel stubs
+        stub_cpp = os.path.join(work_dir, '__qir_runner_kernels.cpp')
+        with open(stub_cpp, 'w') as f:
+            f.write('/* Auto-generated kernel stubs for CUDA + qir-runner hybrid */\n')
+            f.write('extern "C" void qir_runner_execute(const char* kernel_name, int shots);\n\n')
+            for base, _ in bc_files:
+                f.write('extern "C" void __internal_mlir_{}() {{\n'.format(base))
+                f.write('  qir_runner_execute("{}", 0);\n'.format(base))
+                f.write('}\n\n')
+        stub_o = os.path.join(work_dir, '__qir_runner_kernels.o')
+        cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc_cuda + ['-o', stub_o, stub_cpp]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True)
+
+        # 5. Link
+        exe_name = output_exe if output_exe else 'hybrid_app'
+        lib_dir = '@CMAKE_INSTALL_PREFIX@/lib'
+        runtime_a = None
+        for cand in [
+            os.path.join(build_base or '', 'mlir', 'qir_runner_runtime', 'libqir-runner-runtime.a'),
+            os.path.join(lib_dir, 'libqir-runner-runtime.a'),
+            os.path.join(os.path.expanduser('~'), '.qllvm', 'lib', 'libqir-runner-runtime.a'),
+        ]:
+            if cand and os.path.exists(cand):
+                runtime_a = cand
+                break
+        if not runtime_a:
+            raise FileNotFoundError('libqir-runner-runtime.a not found. Build qllvm with ninja install.')
+        cuda_lib_dir = os.path.join(cuda_path, 'lib64')
+        link_cmd = [cxx_compiler, '-o', exe_name] + cpp_objs + cu_objs + [stub_o, runtime_a,
+                   '-L' + cuda_lib_dir, '-lcudart', '-lcuda', '-ldl', '-lrt', '-lpthread']
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        # 6. Cleanup temp files
+        for f in [stub_cpp, stub_o] + cpp_objs + cu_objs:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid (C+++CUDA+qir-runner) executable: {}. Run with: {} -shots <n>'.format(exe_name, exe_name))
+        return exe_name
+
+    # Phase 1: Hybrid compilation - classical C++ + quantum QASM
+    def compile_hybrid(cpp_files, qasm_files, output_exe=None):
+        """Compile mixed C++ and QASM sources to a single executable (LLVM协同)."""
+        llvm_bin_path = str(pathlib.Path(compiler).parent)
+        qllvm_tool = '@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile'
+        build_base = None
+        if not os.path.exists(qllvm_tool):
+            # Fallback for dev/debug: try cwd/build/bin or cwd/../build/bin
+            for base in [os.getcwd(), os.path.dirname(os.getcwd())]:
+                build_tool = os.path.join(base, 'build', 'bin', 'qllvm-compile')
+                if os.path.exists(build_tool):
+                    qllvm_tool = build_tool
+                    build_base = os.path.join(base, 'build')
+                    break
+        # For build dir: add lib paths so qllvm-compile finds its shared libs
+        run_env = os.environ.copy()
+        if build_base:
+            lib_paths = [os.path.join(build_base, 'lib'), os.path.join(build_base, 'mlir', 'parsers', 'qiskit'),
+                        os.path.join(build_base, 'mlir', 'parsers', 'qasm3'), os.path.join(build_base, 'mlir', 'dialect')]
+            run_env['LD_LIBRARY_PATH'] = ':'.join(lib_paths) + (':' + run_env.get('LD_LIBRARY_PATH', ''))
+        work_dir = os.getcwd()
+        ll_files = []
+        bc_files = []
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+
+        # 1. Compile each QASM to LLVM IR (no entry point - kernel only)
+        for qasm_file in qasm_files:
+            base = os.path.splitext(os.path.basename(qasm_file))[0]
+            ll_path = os.path.join(work_dir, base + '_qir.ll')
+            # Preprocess QASM (handle includes)
+            preproc_cmd = [compiler, '-x', 'c++', '-E', '-P', qasm_file]
+            if verbose:
+                info(' '.join(preproc_cmd))
+            try:
+                result = subprocess.check_output(preproc_cmd).decode('ascii')
+            except Exception:
+                result = open(qasm_file, 'r').read()
+            if os.path.splitext(qasm_file)[1] == '.qasm':
+                filter_lines = [line for line in result.split('\n')
+                    if 'OPENQASM' not in line and len(line) > 0]
+                text = 'OPENQASM 3;\n' + '\n'.join(filter_lines)
+            else:
+                text = result
+            tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
+            with open(tmp_qasm, 'w') as f:
+                f.write(text)
+            qrt_val = 'nisq'
+            if '-qrt' in sys.argv[1:]:
+                qrt_val = sys.argv[sys.argv.index('-qrt') + 1]
+            cmd = [qllvm_tool, tmp_qasm, '-no-entrypoint', '-internal-func-name', base,
+                   '-output-ll', ll_path, opt_level, '-qrt', qrt_val]
+            if '-qpu' in sys.argv[1:]:
+                idx = sys.argv.index('-qpu')
+                cmd.extend(['-qpu', sys.argv[idx+1]])
+            if '-basicgate' in str(sys.argv):
+                for a in sys.argv[1:]:
+                    if '-basicgate' in a:
+                        cmd.append(a)
+                        break
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True, env=run_env)
+            os.remove(tmp_qasm)
+            ll_files.append(ll_path)
+
+        # 2. Compile each C++ to LLVM IR
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            ll_path = os.path.join(work_dir, base + '_classical.ll')
+            cmd = [compiler, '-S', '-emit-llvm', '-std=c++17', '-o', ll_path, cpp_file]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            ll_files.append(ll_path)
+
+        # 3. Convert .ll to .bc and link
+        for ll_path in ll_files:
+            bc_path = ll_path.replace('.ll', '.bc')
+            as_cmd = [llvm_bin_path + '/llvm-as', ll_path, '-o', bc_path]
+            if verbose:
+                info(' '.join(as_cmd))
+            subprocess.run(as_cmd, check=True)
+            bc_files.append(bc_path)
+
+        merged_bc = os.path.join(work_dir, '__hybrid_merged.bc')
+        link_cmd = [llvm_bin_path + '/llvm-link', '-o', merged_bc] + bc_files
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        # 4. Compile to object
+        merged_o = os.path.join(work_dir, '__hybrid_merged.o')
+        llc_cmd = [llvm_bin_path + '/llc', '-filetype=obj', merged_bc, '-o', merged_o]
+        if verbose:
+            info(' '.join(llc_cmd))
+        subprocess.run(llc_cmd, check=True)
+
+        # 5. Link to executable
+        exe_name = output_exe if output_exe else 'hybrid_app'
+        lib_dir = '@CMAKE_INSTALL_PREFIX@/lib'
+        if build_base:
+            stub_path = os.path.join(build_base, 'mlir', 'qir_qrt_stub')
+            if os.path.exists(os.path.join(stub_path, 'libqir-qrt-stub.so')) or \
+               os.path.exists(os.path.join(stub_path, 'libqir-qrt-stub.dylib')):
+                lib_dir = stub_path
+        hybrid_libs = ['-rdynamic', '-Wl,-rpath,' + lib_dir + ':@LLVM_INSTALL_PREFIX@/lib',
+                      '-L', lib_dir, '-lpthread']
+        if os.path.exists(os.path.join(lib_dir, 'libqir-qrt-stub.so')) or \
+             os.path.exists(os.path.join(lib_dir, 'libqir-qrt-stub.dylib')):
+            hybrid_libs += ['-lqir-qrt-stub']
+        else:
+            raise FileNotFoundError(
+                'libqir-qrt-stub not found under ' + lib_dir + '. Run cmake install.')
+        link_cmd = [compiler, merged_o, '-o', exe_name] + hybrid_libs
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        # Cleanup intermediates
+        for f in ll_files + bc_files:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        try:
+            os.remove(merged_bc)
+            os.remove(merged_o)
+        except OSError:
+            pass
+        if verbose:
+            info('Hybrid executable: {}'.format(exe_name))
+        return exe_name
+
+    # Define custom compilation routines for OpenQASM and Q#
+    # i.e. use custom tool to lower to LLVM IR -> LLVM assembler
+    # To support mixing multiple file types in one compilation.
+    # Util to compile QASM2/3 (MLIR)
+    def compile_qasm(filename):
+        
+        global Qasmmap
+        input_backend_extra = []
+        input_backend = None
+
+        if os.path.splitext(filename)[1] == '.py':
+            if '-input-backend' in sys.argv[1:]:
+                input_backend = sys.argv[sys.argv.index('-input-backend') + 1]
+                sys.argv.remove(input_backend)
+                sys.argv.remove('-input-backend')
+
+                if input_backend == 'originir':
+                    from pyqpanda3.intermediate_compiler import convert_originir_file_to_qprog,convert_qprog_to_qasm
+                    qprog = convert_originir_file_to_qprog(filename)
+                    originir_to_qasm = convert_qprog_to_qasm(qprog)
+                elif input_backend not in {'qcis','qiskit'}:
+                    print("Currently only support originir, qcis and qiskit")
+                    print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                    exit(1)
+                input_backend_extra = ['-input-backend', input_backend]
+            else:
+                print("Invalid compile command: Python file must provide input backend.\neg. -input-backend originir")
+                print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                exit(1)
+
+        llvm_bin_path = str(pathlib.Path(compiler).parent)
+        # Run preprocessor to handle any includes
+        result = ''
+        if os.path.splitext(filename)[1] == '.qasm':
+            result = subprocess.check_output(
+                [compiler, '-x', 'c++', '-E', '-P', filename]).decode('ascii')
+            has_no_entry_point_pragma = False
+            if '#pragma' in result and 'no_entrypoint' in result:
+                sys.argv.append('-no-entrypoint')
+                has_no_entry_point_pragma = True
+        elif input_backend == 'originir':
+            result = originir_to_qasm
+        elif input_backend == 'qcis':
+            with open(filename, 'r') as f:
+                result = f.read()
+        elif input_backend == 'qiskit':
+            with open(filename, 'r') as f:
+                result = f.read()
+            import tokenize
+            import io
+            tokens = []
+            for tok in tokenize.generate_tokens(io.StringIO(result).readline):
+                if tok.type != tokenize.COMMENT:
+                    tokens.append(tok)
+            result_ = tokenize.untokenize(tokens)
+            lines = result_.splitlines()
+            first_nonempty_line = None
+            for line in lines:
+                stripped = line.strip()
+                if stripped:
+                    first_nonempty_line = stripped
+                    break
+            if first_nonempty_line not in ('from qiskit import QuantumCircuit', 'from qiskit import *'):
+                print("Error: only support from qiskit import QuantumCircuit or from qiskit import *")
+                print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                exit(1)
+            else:
+                lines = result_.splitlines(keepends=True) 
+                if lines:
+                    result = ''.join(lines[1:]) 
+
+            
+        if os.path.splitext(filename)[1] == '.qasm' or input_backend == 'originir':
+            if not check_qasm_header(result.split('\n')):
+                print("QASM file does not have a valid header,Support OpenQASM 2.0")
+                print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                exit(1)
+            filter_lines = [line for line in result.split('\n')
+                        if 'OPENQASM' not in line and len(line) > 0 and (not ('#pragma' in line and 'no_entrypoint' in line))]
+            creg_count = sum(1 for line in filter_lines if "creg" in line)
+
+            if creg_count == 1:
+                for i,line_new in enumerate(filter_lines):
+                    if "creg" in line_new and line_new[-3] == '1':
+                        filter_lines[i] = line_new[:-3] + '2' + line_new[-2:]
+                        break
+        
+        
+            qreg_names = []
+            for line in filter_lines:
+                stripped_line = line.strip()
+                if stripped_line.startswith('qreg '):
+                    # handle multiple formats: qreg q[3]; qreg quantum_reg[5]; etc.
+                    reg_part = stripped_line[5:].split(';')[0].strip()  # remove qreg and semicolon
+                    if '[' in reg_part:
+                        reg_name = reg_part.split('[')[0].strip()
+                        qreg_names.append(reg_name)
+
+            if Qasmmap:
+                modified_lines = []
+                barrier_added = False
+
+                for line in filter_lines:
+                # if the first measurement operation is found and no barrier is added
+                    if not barrier_added and line.strip().startswith('measure'):
+                        # add barrier to each quantum register
+                        for qreg_name in qreg_names:
+                            modified_lines.append(f'barrier {qreg_name};')
+                        barrier_added = True
+
+                    modified_lines.append(line)
+                if not barrier_added:
+                    modified_lines = filter_lines
+
+                text = 'OPENQASM 2.0;\n' + \
+                '\n'.join(modified_lines)
+            else:
+                text = 'OPENQASM 3;\n' + \
+                '\n'.join(filter_lines)
+        
+            # process #pragma export; -> #pragma { export };
+            if '#pragma' in text and 'export' in text:
+                new_text = ''
+                for line in text.split('\n'):
+                    if '#pragma' in line and '{' not in line:
+                        new_text += '#pragma { export; }\n'
+                        continue
+                    new_text+=line+'\n'
+                text = new_text 
+        else:
+            text = result
+
+        base_name = os.path.splitext(filename)[0].split(os.path.sep)[-1]
+        # Write to a temporary file
+
+        temp_file_name = '__tmp__'+base_name+'.qasm'
+        with open(temp_file_name, 'w') as f:
+            f.write(text)
+
+        use_sabre_cpp = '-sabre-cpp' in sys.argv[1:]
+        if use_sabre_cpp:
+            sys.argv.remove('-sabre-cpp')
+        if Qasmmap and input_backend != 'qcis':
+            if not use_sabre_cpp:
+                qiskit_map(temp_file_name)
+            result = subprocess.check_output([compiler, '-x', 'c++', '-E', '-P', temp_file_name]).decode('ascii')
+            text = 'OPENQASM 3;\n' + \
+                '\n'.join([line for line in result.split('\n')
+                           if 'OPENQASM' not in line and len(line) > 0 and (not ('#pragma' in line and 'no_entrypoint' in line))])
+            with open(temp_file_name, 'w') as f:
+                f.write(text)
+
+        extra_args = ['-internal-func-name', base_name] + input_backend_extra
+        if '-no-entrypoint' in sys.argv[1:]:
+            sys.argv.remove('-no-entrypoint')
+            extra_args.append('-no-entrypoint')
+        
+        # FIXME: define pass-management CLI options for qllvm driver
+        if '--q-optimize' in sys.argv[1:]:
+            sys.argv.remove('--q-optimize')
+            extra_args.append('--q-optimize')
+        # Parse clang -Ox optimization level:
+
+        for arg in sys.argv[1:]:
+            if re.match(r'^-O\d+$', arg):
+                if arg not in {'-O0','-O1'}:
+                    print('Not support optimization level:',arg)
+                    print('Onlyr support optimization level: O0 or O1')
+                    print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+                    exit(1)
+                extra_args.append(arg)
+        
+        if len(accName):
+            extra_args.append('-qpu')
+            extra_args.append(accName)
+
+        if len(qrtName):
+            extra_args.append('-qrt')
+            extra_args.append(qrtName)
+
+        if len(placementName):
+            extra_args.append('-placement')
+            extra_args.append(placementName)
+
+        if '-verbose-error' in sys.argv[1:]:
+            extra_args.append('-verbose-error')
+            sys.argv.remove('-verbose-error')
+
+        if '-print-final-submission' in sys.argv[1:]:
+            extra_args.append('-print-final-submission')
+
+        # Some options that we want to pass on to mlir tool
+        # (a subset of --help that we think is useful)
+        mlir_forward_options = ['--pass-timing', '--print-ir-after-all', '--print-ir-after-change', '--print-ir-before-all']
+        for mlir_forward_option in mlir_forward_options:
+            if mlir_forward_option in sys.argv[1:]:
+                # Forward to mlir tool
+                extra_args.append(mlir_forward_option)
+                # and remove from the main qllvm args
+                sys.argv.remove(mlir_forward_option)
+        if '-circuit-state' in sys.argv[1:]:
+            extra_args.append('-circuit-state')
+            sys.argv.remove('-circuit-state')
+
+        if '-emitmlir' in sys.argv[1:]:
+           extra_args.append('-emitmlir')
+           sys.argv.remove('-emitmlir')
+        if '-emitqir' in sys.argv[1:]:
+           extra_args.append('-emitqir')
+           sys.argv.remove('-emitqir')
+
+        for a in sys.argv[1:]:
+            if('-basicgate' in a):
+                extra_args.append(a)
+                sys.argv.remove(a)
+                break
+
+        if '-pass-count' in sys.argv[1:]:
+            extra_args.append('-pass-count')
+            sys.argv.remove('-pass-count')
+        if '-syn-opt' in sys.argv[1:]:
+            extra_args.append('-syn-opt')
+            sys.argv.remove('-syn-opt')
+        if '-pass-effect' in sys.argv[1:]:
+            extra_args.append('-pass-effect')
+            sys.argv.remove('-pass-effect')
+
+        for a in sys.argv[1:]:
+            if('-customPassSequence' in a):
+                extra_args.append(a)
+                sys.argv.remove(a)
+                break
+
+        if '-random_seq' in sys.argv[1:]:
+            extra_args.append('-random_seq')
+            sys.argv.remove('-random_seq')
+
+        if Shots:
+            extra_args.append('-shots')
+            extra_args.append(Shots)
+        # Backend code generation: -qpu <backend> triggers emit via BackendRegistry
+        BACKEND_CONFIG = {
+            'qasm-backend': {
+                'emit_arg': '-emit-backend=qasm-backend',
+                'output_suffix': '_compiled.qasm',
+                'post_process': 'qasm',  # run modify_qasm
+            },
+            'qir-runner': {
+                'emit_arg': '-emit-backend=qir-runner',
+                'output_suffix': '.bc',
+            },
+            'tianyan': {
+                'emit_arg': '-emit-backend=tianyan',
+                'output_suffix': '_compiled.py',
+            },
+            'originquantum': {
+                'emit_arg': '-emit-backend=originquantum',
+                'output_suffix': '_compiled.py',
+            }
+        }
+        backend_name = accName.split('[')[0] if '[' in accName else accName
+        backend_name = backend_name.split(':')[0] if ':' in backend_name else backend_name
+        use_backend_path = (backend_name in BACKEND_CONFIG)
+        if use_backend_path:
+            cfg = BACKEND_CONFIG[backend_name]
+            extra_args.append(cfg['emit_arg'])
+            extra_args.append('-output-path=' + base_name + cfg['output_suffix'])
+            if use_sabre_cpp and Qasmmap and connectivity_initial:
+                sabre_edges = ';'.join(f"{e[0]},{e[1]}" for e in connectivity_initial)
+                extra_args.append('-sabre-coupling-map=' + sabre_edges)
+
+        # Operate on the temporary file
+        # print(f"compile qasm extra_args:  {extra_args}")
+        # print("start to compile")
+        result = subprocess.run(
+                ['@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile', temp_file_name] + extra_args, check=True)
+        # print("finish compile")
+        if use_backend_path:
+            os.remove(temp_file_name)
+            output_path = base_name + BACKEND_CONFIG[backend_name]['output_suffix']
+            if BACKEND_CONFIG[backend_name].get('post_process') == 'qasm':
+                modify_qasm(output_path)
+
+            if 'originquantum' in  accName:
+
+                from pyqpanda3.intermediate_compiler import convert_originir_file_to_qprog, convert_originir_string_to_qprog
+                from pyqpanda3.qcloud.qcloud import ChipBackend
+                from pyqpanda3.qcloud import QCloudService, LogOutput, QCloudOptions
+                from pyqpanda3.transpilation import Transpiler
+                from pyqpanda3.core import QProg, GateType, RPHI,U3
+                import numpy as np
+
+                api_key = "b39c7065b7992add6929d9bc88e72613154112b4006333fb9c73e37784552ae568527a73645039687961386e67757a37" # Replace with your own key
+                
+                prog_1 = convert_originir_file_to_qprog(output_path)
+
+                rz_angles = [0]*prog_1.qubits_num()
+                rphi_cz_prog = QProg()
+                measure_nodes = prog_1.get_measure_nodes()
+                for gate in prog_1.gate_operations():
+                    if gate.gate_type() == GateType.RZ:
+                        rz_angles[gate.qubits()[0]] -= gate.parameters()[0]
+                    elif gate.gate_type() == GateType.BARRIER:
+                        rphi_cz_prog << gate
+                    elif gate.gate_type() == GateType.CZ:
+                        rphi_cz_prog << gate
+                    elif gate.gate_type() == GateType.RPHI:
+                        rphi_cz_prog << gate
+                    else:
+                        raise ValueError("NOT SUPPORT GATE TYPE!!!!")
+                for nodes in measure_nodes:
+                    rphi_cz_prog << nodes
+
+                    # Obtain the service
+                service = QCloudService(api_key)
+                backend_wukong = service.backend("180")
+                chip_info = backend_wukong.chip_info()
+                backend: ChipBackend = chip_info.get_chip_backend()
+            
+                # Convert to chip instruction
+                use_pattern = False
+                ins = rphi_cz_prog.to_instruction(backend, 1, use_pattern)
+
+                output_path_temp = f"{base_name}_compiled.json"
+                with open(output_path_temp, 'w') as file:
+                    file.write(ins)
+
+                os.system(f"rm {output_path}")
+                output_path = output_path_temp
+            
+
+            if '-o' in sys.argv[1:]:
+                fidx = sys.argv.index('-o')
+                output_file = sys.argv[fidx+1]
+                qasm_name_temp = filename.rsplit('/')[-1]
+                exe_folder = output_file.rsplit('/', 1)[0]
+                qasm_name = qasm_name_temp.rsplit('.', 1)[0]
+                exe_name = output_file.split('/')[-1]
+
+                if 'qasm-backend' in accName:
+                    if '/' in output_file:
+                        os.system(f" mv {output_path} {exe_folder}/{exe_name}.qasm")
+                        output_path = f"{exe_folder}/{exe_name}.qasm"
+                    else:
+                        current_dir = os.getcwd()
+                        os.system(f"cd {current_dir} && mv {output_path} {exe_name}.qasm")
+                elif 'qir-runner' in accName:
+                    dest_bc = output_file if output_file.endswith('.bc') else output_file + '.bc'
+                    os.system(f" mv {output_path} {dest_bc}")
+                    output_path = dest_bc
+                elif 'tianyan' in  accName:
+                    if '/' in output_file:
+                        os.system(f" mv {output_path} {exe_folder}/{exe_name}.py")
+                    else:
+                        current_dir = os.getcwd()
+                        os.system(f"cd {current_dir} && mv {output_path} {exe_name}.py")
+                elif 'originquantum' in  accName:
+                    if '/' in output_file:
+                        os.system(f" mv {output_path} {exe_folder}/{exe_name}.py")
+                        # os.system(f" mv {output_path} {exe_folder}/{exe_name}.json")
+                    else:
+                        current_dir = os.getcwd()
+                        os.system(f"cd {current_dir} && mv {output_path} {exe_name}.py")   
+                        # os.system(f"cd {current_dir} && mv {output_path} {exe_name}.json")   
+            exit(0)
+
+    # Phase 1: Detect hybrid compilation (classical C++/CUDA + quantum QASM)
+    cpp_files = [arg for arg in sys.argv[1:] if os.path.isfile(arg) and os.path.splitext(arg)[1] in ['.cpp', '.cc', '.cxx']]
+    cu_files = [arg for arg in sys.argv[1:] if os.path.isfile(arg) and os.path.splitext(arg)[1] == '.cu']
+    qasm_files = [arg for arg in sys.argv[1:] if os.path.isfile(arg) and os.path.splitext(arg)[1] == '.qasm']
+
+    if (cpp_files or cu_files) and qasm_files:
+        output_exe = 'hybrid_app'
+        if '-o' in sys.argv[1:]:
+            idx = sys.argv.index('-o')
+            output_exe = sys.argv[idx + 1]
+            sys.argv.remove(output_exe)
+            sys.argv.remove('-o')
+        try:
+            if cu_files:
+                compile_hybrid_cuda_quantum(cpp_files, cu_files, qasm_files, output_exe)
+            # Default hybrid (C++ + QASM): qir-runner subprocess, or LLVM link with qir-qrt-stub (see compile_hybrid).
+            elif accName in ('qir-runner', 'qpp'):
+                compile_hybrid_qir_runner(cpp_files, qasm_files, output_exe)
+            else:
+                compile_hybrid(cpp_files, qasm_files, output_exe)
+        except subprocess.CalledProcessError as e:
+            if verbose:
+                print(e)
+            exit(e.returncode if hasattr(e, 'returncode') else 1)
+        except Exception as e:
+            print(bcolors.FAIL + '[qllvm] Hybrid compile failed: ' + str(e) + bcolors.ENDC, file=sys.stderr)
+            if verbose or '-v' in sys.argv:
+                import traceback
+                traceback.print_exc()
+            exit(1)
+        exit(0)
+
+    for arg in sys.argv[1:]:
+        if os.path.isfile(arg) and mimetypes.guess_type(arg)[0] is not None:
+            filename = arg
+            fileType = mimetypes.guess_type(filename)[0]
+            if fileType == 'text/x-c++src':
+                if OPENQASM_ONLY_BUILD:
+                    print(bcolors.FAIL + '[qllvm] C++ compilation is not supported in OpenQASM-only build. Use .qasm or .py (OpenQASM) input files.' + bcolors.ENDC)
+                    exit(1)
+                break
+        if os.path.isfile(arg) and (os.path.splitext(arg)[1] == '.qasm' or os.path.splitext(arg)[1] == '.py'):
+            fileType = 'openqasm'
+            filename = arg
+            # ZHUYU_202504_BEGIN
+            if '-kernel' in sys.argv[1:]:
+                sidx = sys.argv.index('-kernel')
+                kernelName = sys.argv[sidx+1]
+                sys.argv.remove('-kernel')
+                sys.argv.remove(kernelName)
+                if kernelName in ['qft','qpe','dj','ghz','wstate','phase_code','bit_code']:
+                    kernelSize = '100'
+                    backendTopology = 'line'
+                    if '-kernel-size' in sys.argv[1:]:
+                        sidx = sys.argv.index('-kernel-size')
+                        kernelSize = sys.argv[sidx+1]
+                        sys.argv.remove('-kernel-size')
+                        sys.argv.remove(kernelSize)
+                    if '-backend-topology' in sys.argv[1:]:
+                        sidx = sys.argv.index('-backend-topology')
+                        backendTopology = sys.argv[sidx+1]
+                        sys.argv.remove('-backend-topology')
+                        sys.argv.remove(backendTopology)
+                        if backendTopology not in ['grid','line']:
+                            print('unsupported backend topology\n')
+                            backendTopology =  'line'
+                    kernel_containning_folder = 'mapped_1d_qasm3/'
+                    if backendTopology == 'grid':
+                        kernel_containning_folder ='mapped_2d_qasm3/'
+                    sidx = sys.argv.index(filename)
+                    import shutil
+                    kernel_filename = '@CMAKE_INSTALL_PREFIX@/kernel_optimized/'+ kernel_containning_folder + kernelName + '/' + kernelName + '.qasm'
+                    temp_kernel_filename = '@CMAKE_INSTALL_PREFIX@/kernel_optimized/'+ kernel_containning_folder + kernelName + '/' + kernelName + '_' + kernelSize + '.qasm'
+                    shutil.copy(kernel_filename,temp_kernel_filename)
+                    with open(temp_kernel_filename,'a') as file:
+                        file.write('const nc = '+kernelSize+';\nqubit q1[nc];\n'+kernelName+'(nc) q1;\n')
+
+                    filename = temp_kernel_filename 
+                    sys.argv[sidx] = filename
+                else:
+                    print("unsupported kernel")
+            
+            compile_qasm(filename)
+        
+       
+    return 0
+
+if __name__ == "__main__":
+    r = 0
+    try:
+        r = main()
+        sys.exit(r)
+    except Exception as e:
+        if r != 0 or e != None:
+            print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+            print(f"error file: {sys.argv}")
+            if fatal_error_verbose:
+                print(e)
