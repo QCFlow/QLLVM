@@ -11,26 +11,26 @@ from qiskit.qasm2 import dumps
 from qiskit_aer import Aer
 from pyqpanda3.intermediate_compiler import convert_qprog_to_qasm,convert_originir_string_to_qprog
 
-def compile(circuit,in_backend,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False):
-    if in_backend == 'qasm' or in_backend == 'qcis':
+def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False):
+    if input == 'qasm' or input == 'qcis':
         qasm_str = circuit
-    elif in_backend =='qiskit':
+    elif input =='qiskit':
         qasm_str = dumps(circuit)
-    elif in_backend == 'qprog':
+    elif input == 'qprog':
         qasm_str = convert_qprog_to_qasm(circuit)
-    elif in_backend == 'originir':
+    elif input == 'originir':
         qasm_q = convert_originir_string_to_qprog(circuit)
         qasm_str = convert_qprog_to_qasm(qasm_q)
 
     else:
-        raise ValueError(f"Backend {in_backend} not supported")
+        raise ValueError(f"Backend {input} not supported")
 
     current_dir = os.getcwd()
     origin_file = f"{current_dir}/_temp.qasm"
     with open(origin_file, 'w') as file:
         file.write(qasm_str)
 
-    compile_command = f"qcc {origin_file} -qrt nisq -qpu {out_backend} -O{optlevel}"
+    compile_command = f"qllvm {origin_file} -qrt nisq -qpu {out_backend} -O{optlevel}"
     if backend_config:
         compile_command += f" -qpu-config {backend_config}"
     if basicgate:
@@ -42,12 +42,3 @@ def compile(circuit,in_backend,out_backend='gasm-backend', backend_config='', ba
         compile_command += f" -circuit-state"
     os.system(compile_command)
     os.system(f"rm {origin_file}")
-    if output_path:
-        print(f"The compiled file has been saved to: {output_path}")
-    else:
-        if out_backend in {"tianyan","originquantum"}:
-            output_path = f"{current_dir}/_temp_compiled.py"
-        else:
-            output_path = f"{current_dir}/_temp_compiled.qasm"
-
-        print(f"The compiled file has been saved to: {output_path}")

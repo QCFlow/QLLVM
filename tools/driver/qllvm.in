@@ -659,8 +659,14 @@ def main(argv=None):
         if not runtime_a:
             raise FileNotFoundError('libqir-runner-runtime.a not found. Build qllvm with ninja install.')
         cuda_lib_dir = os.path.join(cuda_path, 'lib64')
-        link_cmd = [cxx_compiler, '-o', exe_name] + cpp_objs + cu_objs + [stub_o, runtime_a,
-                   '-L' + cuda_lib_dir, '-lcudart', '-lcuda', '-ldl', '-lrt', '-lpthread']
+        obj_inputs = cpp_objs + cu_objs + [stub_o, runtime_a]
+        if nvcc_path:
+            link_cmd = ([nvcc_path, '-o', exe_name, '-arch=' + cuda_arch] + obj_inputs +
+                        ['-L' + cuda_lib_dir, '-lcudart', '-lcuda', '-ldl', '-lrt', '-lpthread',
+                         '-Xcompiler', '-std=c++17'])
+        else:
+            link_cmd = ([cxx_compiler, '-o', exe_name] + obj_inputs +
+                        ['-L' + cuda_lib_dir, '-lcudart', '-lcuda', '-ldl', '-lrt', '-lpthread'])
         if verbose:
             info(' '.join(link_cmd))
         subprocess.run(link_cmd, check=True)
