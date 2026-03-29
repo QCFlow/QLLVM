@@ -1067,7 +1067,7 @@ def main(argv=None):
             },
             'tianyan': {
                 'emit_arg': '-emit-backend=tianyan',
-                'output_suffix': '_compiled.py',
+                'output_suffix': '_compiled.qcis',
             },
             'originquantum': {
                 'emit_arg': '-emit-backend=originquantum',
@@ -1141,8 +1141,8 @@ def main(argv=None):
                 with open(output_path_temp, 'w') as file:
                     file.write(ins)
 
-                os.system(f"rm {output_path}")
-                output_path = output_path_temp
+                # os.system(f"rm {output_path}")
+                # output_path = output_path_temp
             
 
             if '-o' in sys.argv[1:]:
@@ -1166,18 +1166,18 @@ def main(argv=None):
                     output_path = dest_bc
                 elif 'tianyan' in  accName:
                     if '/' in output_file:
-                        os.system(f" mv {output_path} {exe_folder}/{exe_name}.py")
+                        os.system(f" mv {output_path} {exe_folder}/{exe_name}.qcis")
                     else:
                         current_dir = os.getcwd()
-                        os.system(f"cd {current_dir} && mv {output_path} {exe_name}.py")
+                        os.system(f"cd {current_dir} && mv {output_path} {exe_name}.qcis")
                 elif 'originquantum' in  accName:
                     if '/' in output_file:
                         os.system(f" mv {output_path} {exe_folder}/{exe_name}.py")
-                        # os.system(f" mv {output_path} {exe_folder}/{exe_name}.json")
+                        os.system(f" mv {output_path_temp} {exe_folder}/{exe_name}.json")
                     else:
                         current_dir = os.getcwd()
                         os.system(f"cd {current_dir} && mv {output_path} {exe_name}.py")   
-                        # os.system(f"cd {current_dir} && mv {output_path} {exe_name}.json")   
+                        os.system(f"cd {current_dir} && mv {output_path_temp} {exe_name}.json")   
             exit(0)
 
     # Phase 1: Detect hybrid compilation (classical C++/CUDA + quantum QASM)

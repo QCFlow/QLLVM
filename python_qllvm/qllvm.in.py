@@ -10,6 +10,8 @@ from qiskit import QuantumCircuit,transpile
 from qiskit.qasm2 import dumps
 from qiskit_aer import Aer
 from pyqpanda3.intermediate_compiler import convert_qprog_to_qasm,convert_originir_string_to_qprog
+import cirq
+
 
 def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False):
     if input == 'qasm' or input == 'qcis':
@@ -21,7 +23,8 @@ def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicga
     elif input == 'originir':
         qasm_q = convert_originir_string_to_qprog(circuit)
         qasm_str = convert_qprog_to_qasm(qasm_q)
-
+    elif input == 'cirq':
+        qasm_str = cirq.qasm(circuit)
     else:
         raise ValueError(f"Backend {input} not supported")
 
