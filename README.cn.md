@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://openreview.net/forum?id=5N3z9JQJKq"><img src="https://img.shields.io/badge/ICLR-2026-8A2BE2?style=for-the-badge&logo=openreview&logoColor=white&color=6f2da8" alt="ICLR 2026"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-00A67E?style=for-the-badge&logo=opensourceinitiative&logoColor=white" alt="License: MIT"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-D22128?style=for-the-badge&logo=apache&logoColor=white" alt="License: Apache 2.0"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
 </p>
 
