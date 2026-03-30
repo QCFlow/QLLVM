@@ -9,8 +9,6 @@
 # Any modifications or derivative works of this code must retain this
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
-#
-# Modified by QCFlow (2026) for QLLVM project.
 
 import os
 from qiskit import QuantumCircuit

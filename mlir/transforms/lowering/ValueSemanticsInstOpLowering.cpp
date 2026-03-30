@@ -7,6 +7,8 @@
  * Contributors:
  *   Alexander J. McCaskey - initial API and implementation
  *   Thien Nguyen - implementation
+ *
+ * Modified by QCFlow (2026) for QLLVM project.
  *******************************************************************************/
 #include "ValueSemanticsInstOpLowering.hpp"
 

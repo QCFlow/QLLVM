@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 <!-- Dynamic gradient background effect (implemented with SVG) -->
 <img src="docs/image/QLLVM0.0.png" alt="QLLVM Logo" width="100%"/>
@@ -24,9 +24,9 @@
 
 **QLLVM** is a classical-quantum hybrid compilation framework built on [LLVM](https://llvm.org/), with excellent **extensibility** and seamless integration with the **classical high-performance computing ecosystem**.
 
-QLLVM supports multiple quantum programming languages and backends, including Qiskit and OpenQASM, with target backends such as qasm simulators, native quantum computers, and China Telecom’s “Tianyan” quantum computer.
+QLLVM supports multiple quantum programming languages and backends, including Qiskit, Criq, Qpanda, OpenQASM, etc., with target backend instructions including openQASM2.0, OriginIR, qcis, etc.
 
-QLLVM supports unified compilation of quantum programs, CUDA programs, and classical C++ programs, providing an efficient, flexible, industrial-grade compilation infrastructure for future classical-quantum software development.
+QLLVM supports unified compilation of quantum programs, CUDA programs, and classical C++ programs, providing an efficient, flexible, industrial-grade compilation infrastructure for classical-quantum software development.
 
 For more details on how to use QLLVM, please refer to the documentation here: [QLLVM Documentation](https://qllvm-documentation.readthedocs.io/en/latest/index.en.html)
 
