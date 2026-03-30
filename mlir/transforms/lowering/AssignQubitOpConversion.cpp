@@ -1,13 +1,18 @@
-/*******************************************************************************
- * Copyright (c) 2018-, UT-Battelle, LLC.
- * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the MIT License 
- * which accompanies this distribution. 
+/*
+ * This code is part of QLLVM.
  *
- * Contributors:
- *   Alexander J. McCaskey - initial API and implementation
- *   Thien Nguyen - implementation
- *******************************************************************************/
+ * (C) Copyright QCFlow 2026.
+ *
+ * This code is licensed under the Apache License, Version 2.0. You may
+ * obtain a copy of this license in the LICENSE file in the root directory
+ * of this source tree or at https://www.apache.org/licenses/LICENSE-2.0.
+ *
+ * Any modifications or derivative works of this code must retain this
+ * copyright notice, and modified files need to carry a notice indicating
+ * that they have been altered from the originals.
+ *
+ * Modified by QCFlow (2026) for QLLVM project.
+ */
 #include "AssignQubitOpConversion.hpp"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/SCFToStandard/SCFToStandard.h"

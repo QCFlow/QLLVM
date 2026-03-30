@@ -1,3 +1,18 @@
+//===----------------------------------------------------------------------===
+// Quantum operations definition
+//===----------------------------------------------------------------------===
+//
+// Copyright (c) 2018-, UT-Battelle, LLC.
+// All rights reserved. This program and the accompanying materials
+// are made available under the terms of the MIT License
+// which accompanies this distribution.
+//
+// Contributors:
+//   Alexander J. McCaskey - initial API and implementation
+//   Thien Nguyen - implementation
+//
+// Modified by QCFlow (2026) for QLLVM project.
+//
 #ifndef Quantum_OPS
 #define Quantum_OPS
 
