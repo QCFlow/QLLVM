@@ -441,7 +441,7 @@ def main(argv=None):
                     shots = int(sys.argv[idx])
                 except ValueError:
                     pass
-
+        
         # 1. Compile each QASM to .bc (qir-runner backend)
         bc_files = []
         for qasm_file in qasm_files:
@@ -463,6 +463,12 @@ def main(argv=None):
                 f.write(text)
             cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
                    '-emit-backend=qir-runner', '-output-path=' + bc_path]
+
+            if '-basicgate' in str(sys.argv):
+                for a in sys.argv[1:]:
+                    if '-basicgate' in a:
+                        cmd.append(a)
+                        break
             if verbose:
                 info(' '.join(cmd))
             subprocess.run(cmd, check=True, env=run_env)
@@ -623,6 +629,11 @@ def main(argv=None):
                 f.write(text)
             cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
                    '-emit-backend=qir-runner', '-output-path=' + bc_path]
+            if '-basicgate' in str(sys.argv):
+                for a in sys.argv[1:]:
+                    if '-basicgate' in a:
+                        cmd.append(a)
+                        break
             if verbose:
                 info(' '.join(cmd))
             subprocess.run(cmd, check=True, env=run_env)
