@@ -31,9 +31,6 @@
 using namespace mlir;
 
 namespace qllvm {
-using pauli_decomp_t = std::pair<std::string, double>;
-  void find_runs(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_run,mlir::quantum::ValueSemanticsInstOp op,int owner_or_user);
-  Eigen::MatrixXcd totalMat(std::vector<mlir::quantum::ValueSemanticsInstOp> &blocks);
 struct Check_gate
     : public PassWrapper<Check_gate, OperationPass<ModuleOp>> {
   void getDependentDialects(DialectRegistry &registry) const override;
