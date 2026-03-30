@@ -469,6 +469,8 @@ def main(argv=None):
                     if '-basicgate' in a:
                         cmd.append(a)
                         break
+            else:
+                cmd.append('-basicgate=[rx,ry,rz,cz,h,x,y,z]')
             if verbose:
                 info(' '.join(cmd))
             subprocess.run(cmd, check=True, env=run_env)
