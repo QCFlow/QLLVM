@@ -20,6 +20,18 @@ def info(msg):
     print('{}[qllvm]{} {}{}'.format(bcolors.BOLD+bcolors.OKBLUE,
                                     bcolors.ENDC+bcolors.BOLD, msg, bcolors.ENDC))
 
+def resolve_qllvm_compile_exe():
+    """Use build-tree qllvm-compile when present; else install prefix."""
+    install_exe = '@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile'
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (
+        os.path.join(here, 'bin', 'qllvm-compile'),
+        os.path.join(here, 'qllvm-compile'),
+    ):
+        if os.path.exists(cand):
+            return cand
+    return install_exe
+
 def modify_qasm(file_path):
     # read QASM file content
     with open(file_path, 'r') as file:
@@ -1106,7 +1118,7 @@ def main(argv=None):
         # print(f"compile qasm extra_args:  {extra_args}")
         # print("start to compile")
         result = subprocess.run(
-                ['@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile', temp_file_name] + extra_args, check=True)
+                [resolve_qllvm_compile_exe(), temp_file_name] + extra_args, check=True)
         # print("finish compile")
         if use_backend_path:
             os.remove(temp_file_name)

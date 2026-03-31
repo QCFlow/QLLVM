@@ -514,23 +514,27 @@ void rz_to_rx_ry(mlir::quantum::ValueSemanticsInstOp &op){
 
     auto theta_val_PI_2 = rewriter.create<mlir::ConstantOp>(
                         op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), M_PI_2));
+    auto theta_val_neg_PI_2 = rewriter.create<mlir::ConstantOp>(
+                            op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), -1*M_PI_2));
 
     param_value.clear();
-    param_value.emplace_back(theta_val_PI_2);
+    param_value.emplace_back(theta_val_neg_PI_2);
                    
     auto new_gate_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
             op.getLoc(), llvm::makeArrayRef({q_type}),
-            "ry", llvm::makeArrayRef({inputQubit_0}),
+            "rx", llvm::makeArrayRef({inputQubit_0}),
             llvm::makeArrayRef(param_value));
     inputQubit_0 = new_gate_1.getResult(0);
     auto new_gate_2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
             op.getLoc(), llvm::makeArrayRef({q_type}),
-            "rx", llvm::makeArrayRef({inputQubit_0}),
+            "ry", llvm::makeArrayRef({inputQubit_0}),
             llvm::makeArrayRef({theta}));
     inputQubit_0 = new_gate_2.getResult(0);
+    param_value.clear();
+    param_value.emplace_back(theta_val_PI_2);
     auto new_gate_3 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
             op.getLoc(), llvm::makeArrayRef({q_type}),
-            "ry", llvm::makeArrayRef({inputQubit_0}),
+            "rx", llvm::makeArrayRef({inputQubit_0}),
             llvm::makeArrayRef(param_value));
     inputQubit_0 = new_gate_3.getResult(0);
 
@@ -1250,7 +1254,6 @@ void trans_basicgate::runOnOperation(){
     std::vector<mlir::quantum::ValueSemanticsInstOp> dead_ops;
 
     basic_gate_set = basic_gate;
-
     getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
         auto op_name = op.name().str();
         

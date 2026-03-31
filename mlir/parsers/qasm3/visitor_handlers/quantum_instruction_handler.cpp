@@ -441,6 +441,20 @@ antlrcpp::Any qasm3_visitor::visitQuantumGateCall(
 
   std::vector<mlir::Value> returnedValues;
   if (symbol_table.has_seen_function(name)) {
+    mlir::FuncOp callee = symbol_table.get_seen_function(name);
+    // User-defined gates are emitted with signature (f64 params..., qubits...):
+    // return values mirror inputs, so leading results are classical params, not
+    // updated qubits. Previously we aligned every return with qbit_values[0..],
+    // which rewrote the first qubit with an f64 (e.g. inside mcphase(...){ h q3; }).
+    unsigned num_leading_float_params = 0;
+    mlir::FunctionType fnTy = callee.getType();
+    for (mlir::Type inTy : fnTy.getInputs()) {
+      if (inTy.isF64())
+        ++num_leading_float_params;
+      else
+        break;
+    }
+
     std::vector<mlir::Value> operands;
     std::vector<mlir::Type> result_types;
     for (auto p : param_values) {
@@ -451,15 +465,17 @@ antlrcpp::Any qasm3_visitor::visitQuantumGateCall(
       result_types.push_back(qubit_type);
     }
 
-    auto call_op = builder.create<mlir::CallOp>(
-        location, symbol_table.get_seen_function(name), operands);
+    auto call_op =
+        builder.create<mlir::CallOp>(location, callee, operands);
 
     auto return_vals = call_op.getResults();
-    int i = 0;
-    for (auto result : return_vals) {
-      symbol_table.replace_symbol(qbit_values[i], result);
-      i++;
-      returnedValues.emplace_back(result);
+    assert(return_vals.size() ==
+           num_leading_float_params + qbit_values.size());
+    for (unsigned idx = num_leading_float_params; idx < return_vals.size();
+         ++idx) {
+      unsigned qi = idx - num_leading_float_params;
+      symbol_table.replace_symbol(qbit_values[qi], return_vals[idx]);
+      returnedValues.emplace_back(return_vals[idx]);
     }
 
   } else {
