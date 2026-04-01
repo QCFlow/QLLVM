@@ -1,8 +1,5 @@
 OPENQASM 2.0;
 include "qelib1.inc";
-// 3-qubit path MaxCut QAOA (p=5)：更深的代价层 + mixer（rx）交替，仍为同一 H_C。
-// Cost H = 0.5 Z0 Z1 + 0.5 Z1 Z2；角度由 QAOAAnsatz + COBYLA（多随机初值）得到。
-// Z-basis 测量 q0,q1,q2；C++ 假定 bits[0]=q0 .. bits[2]=q2。
 
 qreg q[3];
 creg c[3];
