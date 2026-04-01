@@ -1,8 +1,5 @@
 OPENQASM 2.0;
 include "qelib1.inc";
-// 纠缠子线路 (2w+1=9 qubits, w=4)：b + 4 个 x_ent + 4 个 y_ent；与 felity.ipynb qc_sim 一致
-// 仅测 b 与 4 个 x → 边际分布（笔记本中对 y 求和的结果）
-// q[0]=b, q[1..4]=x_ent[0..3], q[5..8]=y_ent[0..3]
 
 qreg q[9];
 creg c[5];

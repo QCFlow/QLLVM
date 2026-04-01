@@ -117,7 +117,7 @@ std::vector<int> independent_bits() {
   return ind;
 }
 
-// bitstr: 长度 kW+1，bits[j] 为 c[j]（b, x_ent0…），与 gmac_simon.qasm measure 顺序一致
+// bitstr: length kW+1, bits[j] is c[j](b, x_ent0...) in the order of gmac_simon.qasm measure
 bool parse_zsub_key(const char* bitstr, unsigned& key_out) {
   if (std::strlen(bitstr) != static_cast<size_t>(kW + 1))
     return false;
@@ -204,7 +204,7 @@ struct GF2Solver {
   }
 };
 
-/** 由 qir-runner 最后一次直方图填 marginal_est[key]=P_hat，返回 total_shots。 */
+// marginal_est: length kMarginalSlots, marginal_est[key]=P_hat,return total_shots
 int marginal_from_histogram(std::vector<double>& marginal_est) {
   std::vector<int> counts(static_cast<size_t>(kMarginalSlots), 0);
   int total = 0;
@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
 
   std::cout << "\n--- Estimated marginal P_hat = count/shots (shots=" << total_shots << ") ---\n";
   double est_frac_z_dot_zero = 0.0;
-  std::cout << "  z·s_sub 检验 (s_sub=" << s_sub << "):\n";
+  std::cout << "  z·s_sub inspection (s_sub=" << s_sub << "):\n";
   std::vector<std::pair<unsigned, double>> valid_z;
   for (int key = 0; key < kMarginalSlots; ++key) {
     const double prob = marginal[static_cast<size_t>(key)];
