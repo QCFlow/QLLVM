@@ -15,7 +15,7 @@ from pyqpanda3.intermediate_compiler import convert_qprog_to_qasm,convert_origin
 import cirq
 import os
 
-def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False):
+def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False,error_print = False):
     qasm_str = ''
     if input == 'qasm' or input == 'qcis':
         qasm_str = circuit
@@ -48,5 +48,7 @@ def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicga
         compile_command += f" -o {base_path}"
     if state:
         compile_command += f" -circuit-state"
+    if error_print:
+        compile_command += f" -fatal-error-verbose"
     os.system(compile_command)
     os.system(f"rm {origin_file}")
