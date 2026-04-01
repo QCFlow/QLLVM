@@ -1173,44 +1173,154 @@ void trans_p(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::
 }
 
 void trans_sx(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
-  deadOps.emplace_back(op);
-  mlir::OpBuilder rewriter(op);
-  rewriter.setInsertionPointAfter(op);
+    deadOps.emplace_back(op);
+    mlir::OpBuilder rewriter(op);
+    rewriter.setInsertionPointAfter(op);
 
-  std::vector<mlir::Value> param;
-  mlir::Value inputQubit = op.getOperand(0);
+    std::vector<mlir::Value> param;
+    mlir::Value inputQubit = op.getOperand(0);
 
-  mlir::Type qubit_type = inputQubit.getType();
-
-  auto new_inst_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type}),
-                      "sdg", llvm::makeArrayRef({inputQubit}),
-                      llvm::None);
-  inputQubit =  new_inst_1.getResult(0);               
-  auto new_inst_2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type}),
-                      "h", llvm::makeArrayRef({inputQubit}),
-                      llvm::None);
-  inputQubit =  new_inst_2.getResult(0);
-  auto new_inst_3 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type}),
-                      "sdg", llvm::makeArrayRef({inputQubit}),
-                      llvm::None);
-  inputQubit =  new_inst_3.getResult(0);
-
-  op.getResult(0).replaceAllUsesWith(inputQubit);
-
-  if(basic_gate_set.find("sdg") == basic_gate_set.end() && basic_gate_set.find("rz") != basic_gate_set.end()){
-    s_sdg_t_tdg_to_rz(new_inst_1,deadOps);
-    s_sdg_t_tdg_to_rz(new_inst_3,deadOps);
-  }else{
-    assert(false && "Not support to trans SX to the given basic gate");
-  }
-  if(basic_gate_set.find("h") == basic_gate_set.end()){
-    trans_h(new_inst_2,deadOps);
-  }
+    mlir::Type qubit_type = inputQubit.getType();
+    mlir::Value M_PI_2_v = rewriter.create<mlir::ConstantOp>(
+                        op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), M_PI_2));
+        
+    auto new_inst_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "rx", llvm::makeArrayRef({inputQubit}),
+                        llvm::makeArrayRef({M_PI_2_v}));
+    inputQubit =  new_inst_1.getResult(0);
+    op.getResult(0).replaceAllUsesWith(inputQubit);
+    if(basic_gate_set.find("rx") == basic_gate_set.end()){
+        trans_rx(new_inst_1,deadOps);
+    }
 }
 
+void trans_swap_cx(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
+    deadOps.emplace_back(op);
+    mlir::OpBuilder rewriter(op);
+    rewriter.setInsertionPointAfter(op);
+
+    std::vector<mlir::Value> param;
+    mlir::Value inputQubit0 = op.getOperand(0);
+    mlir::Value inputQubit1 = op.getOperand(1);
+    mlir::Type qubit_type = inputQubit0.getType();
+    auto new_inst_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                            op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                            "cx", llvm::makeArrayRef({inputQubit0,inputQubit1}),
+                            llvm::None);
+    inputQubit0 =  new_inst_1.getResult(0);
+    inputQubit1 =  new_inst_1.getResult(1);
+
+    auto new_inst_2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                            op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                            "cx", llvm::makeArrayRef({inputQubit1,inputQubit0}),
+                            llvm::None);
+    inputQubit0 =  new_inst_2.getResult(1);
+    inputQubit1 =  new_inst_2.getResult(0);
+
+    auto new_inst_3 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                            op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                            "cx", llvm::makeArrayRef({inputQubit0,inputQubit1}),
+                            llvm::None);
+    inputQubit0 =  new_inst_3.getResult(0);
+    inputQubit1 =  new_inst_3.getResult(1);
+    op.getResult(0).replaceAllUsesWith(inputQubit0);
+    op.getResult(1).replaceAllUsesWith(inputQubit1);
+}
+
+void trans_swap_sx_cz(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
+    deadOps.emplace_back(op);
+
+    // def_swap_cz.sx(0)
+    // def_swap_cz.sx(1)
+    // def_swap_cz.cz(0, 1)
+    // def_swap_cz.sx(0)
+    // def_swap_cz.sx(1)
+    // def_swap_cz.cz(0, 1)
+    // def_swap_cz.sx(0)
+    // def_swap_cz.sx(1)
+    // def_swap_cz.cz(0, 1)
+
+    mlir::OpBuilder rewriter(op);
+    rewriter.setInsertionPointAfter(op);
+  
+    std::vector<mlir::Value> param;
+    mlir::Value inputQubit0 = op.getOperand(0);
+    mlir::Value inputQubit1 = op.getOperand(1);
+  
+    mlir::Type qubit_type = inputQubit0.getType();
+  
+    auto new_inst_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit0}),
+                        llvm::None);
+    inputQubit0 =  new_inst_1.getResult(0);               
+    auto new_inst_2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit1}),
+                        llvm::None);
+    inputQubit1 =  new_inst_2.getResult(0);
+    auto new_inst_3 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                        "cz", llvm::makeArrayRef({inputQubit0,inputQubit1}),
+                        llvm::None);
+    inputQubit0 =  new_inst_3.getResult(0);
+    inputQubit1 =  new_inst_3.getResult(1);
+
+    auto new_inst_4 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit0}),
+                        llvm::None);
+    inputQubit0 =  new_inst_4.getResult(0);
+    auto new_inst_5 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit1}),
+                        llvm::None);
+    inputQubit1 =  new_inst_5.getResult(0);
+    auto new_inst_6 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                        "cz", llvm::makeArrayRef({inputQubit0,inputQubit1}),
+                        llvm::None);
+    inputQubit0 =  new_inst_6.getResult(0);
+    inputQubit1 =  new_inst_6.getResult(1);
+    auto new_inst_7 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit0}),
+                        llvm::None);
+    inputQubit0 =  new_inst_7.getResult(0);
+    auto new_inst_8 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type}),
+                        "sx", llvm::makeArrayRef({inputQubit1}),
+                        llvm::None);
+    inputQubit1 =  new_inst_8.getResult(0);
+    auto new_inst_9 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
+                        op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
+                        "cz", llvm::makeArrayRef({inputQubit0,inputQubit1}),
+                        llvm::None);
+    inputQubit0 =  new_inst_9.getResult(0);
+    inputQubit1 =  new_inst_9.getResult(1);
+    op.getResult(0).replaceAllUsesWith(inputQubit0);
+    op.getResult(1).replaceAllUsesWith(inputQubit1);
+  
+    if(basic_gate_set.find("sx") == basic_gate_set.end()){
+        trans_sx(new_inst_1,deadOps);
+        trans_sx(new_inst_2,deadOps);
+        trans_sx(new_inst_4,deadOps);
+        trans_sx(new_inst_5,deadOps);
+        trans_sx(new_inst_7,deadOps);
+        trans_sx(new_inst_8,deadOps);
+    }
+}
+
+void trans_swap(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
+    if(basic_gate_set.find("cx") != basic_gate_set.end()){
+        trans_swap_cx(op,deadOps);
+    }else if(basic_gate_set.find("cz") != basic_gate_set.end()){
+        trans_swap_sx_cz(op,deadOps);
+    }else{
+        assert(false && "Not support to trans SWAP to the given basic gate");
+    }
+}
 
 void trans_to_basic(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &dead_ops){
     std::string op_name = op.name().str();
@@ -1244,6 +1354,8 @@ void trans_to_basic(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::qu
         trans_p(op,dead_ops);
     }else if(op_name == "sx"){
         trans_sx(op,dead_ops);
+    }else if(op_name == "swap"){
+        trans_swap(op,dead_ops);
     }else{
         throw std::runtime_error("Not support to trans " + op_name + " to the given basic gate");
     }

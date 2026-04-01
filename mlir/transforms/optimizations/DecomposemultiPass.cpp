@@ -1916,6 +1916,14 @@ void decompose_c3sqrtx_gate(mlir::quantum::ValueSemanticsInstOp &op,std::vector<
   op.getResult(1).replaceAllUsesWith(inputQubit_1);
   op.getResult(2).replaceAllUsesWith(inputQubit_2);
   op.getResult(3).replaceAllUsesWith(inputQubit_3);
+  decompose_cu1_gate(new_inst_2,deadOps);
+  decompose_cu1_gate(new_inst_6,deadOps);
+  decompose_cu1_gate(new_inst_10,deadOps);
+  decompose_cu1_gate(new_inst_14,deadOps);
+  decompose_cu1_gate(new_inst_18,deadOps);
+  decompose_cu1_gate(new_inst_21,deadOps);
+  decompose_cu1_gate(new_inst_24,deadOps);
+
 }
 
  // {"c4x",R"#(gate c4x a,b,c,d,e { h e; cu1(pi/2) d,e; h e; rc3x a,b,c,d; h e; cu1(-pi/2) d,e; h e; rc3x a,b,c,d; c3sqrtx a,b,c,e;})#"},
@@ -2806,39 +2814,6 @@ void decompose_mcrz_gate(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mli
   }
 }
 
-void decompose_swap_gate(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
-  deadOps.emplace_back(op);
-  mlir::OpBuilder rewriter(op);
-  rewriter.setInsertionPointAfter(op);
-
-  std::vector<mlir::Value> param;
-  mlir::Value inputQubit_0 = op.getOperand(0);
-  mlir::Value inputQubit_1 = op.getOperand(1);
-
-  mlir::Type qubit_type = inputQubit_0.getType();
-
-  auto new_inst_1 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
-                      "cx", llvm::makeArrayRef({inputQubit_0,inputQubit_1}),
-                      llvm::None);
-  inputQubit_0 =  new_inst_1.getResult(0);               
-  inputQubit_1 =  new_inst_1.getResult(1);               
-  auto new_inst_2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
-                      "cx", llvm::makeArrayRef({inputQubit_1,inputQubit_0}),
-                      llvm::None);
-  inputQubit_0 =  new_inst_2.getResult(1);               
-  inputQubit_1 =  new_inst_2.getResult(0);   
-  auto new_inst_3 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
-                      op.getLoc(), llvm::makeArrayRef({qubit_type,qubit_type}),
-                      "cx", llvm::makeArrayRef({inputQubit_0,inputQubit_1}),
-                      llvm::None);
-  inputQubit_0 =  new_inst_3.getResult(0);               
-  inputQubit_1 =  new_inst_3.getResult(1);   
-  op.getResult(0).replaceAllUsesWith(inputQubit_0);
-  op.getResult(1).replaceAllUsesWith(inputQubit_1);
-}
-
  // gate dcx a, b { cx a, b; cx b, a; }
 void decompose_dcx_gate(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps){
   deadOps.emplace_back(op);
@@ -3472,10 +3447,10 @@ void decompose_xy2m_gate(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mli
 
 void DecomposemultiPass::runOnOperation() {
   //  std::cout << "DecomposemultiPass: " << std::endl;
-
+  // gen_qasm(getOperation(),"before.qasm");
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
-  std::unordered_set<std::string> gate_set = {"u3","rx","ry","rz","x","y","z","cx","cy","cz","h","sdg","tdg","s","sx","p","cp","t"};
-  std::unordered_set<std::string> gate_to_decompose = {"u1","u2","u0","u","sxdg","ch","cy","cu3","cu1","cu","csx","ccx","cswap","crx","cry","crz","rxx","rzz","ryy","rccx","rc3x","c3x","c3sqrtx","c4x","cpx","cxz","mcx","mcp","mcrx","mcry","mcrz","swap","dcx","rzx","ecr","ccz","r","cs","iswap","csdg","ms","rxy","X2P","X2M","Y2P","Y2M","XY2P","XY2M"};
+  std::unordered_set<std::string> gate_set = {"u3","rx","ry","rz","x","y","z","cx","cy","cz","h","sdg","tdg","s","sx","p","cp","t","swap"};
+  std::unordered_set<std::string> gate_to_decompose = {"u1","u2","u0","u","sxdg","ch","cy","cu3","cu1","cu","csx","ccx","cswap","crx","cry","crz","rxx","rzz","ryy","rccx","rc3x","c3x","c3sqrtx","c4x","cpx","cxz","mcx","mcp","mcrx","mcry","mcrz","dcx","rzx","ecr","ccz","r","cs","iswap","csdg","ms","rxy","X2P","X2M","Y2P","Y2M","XY2P","XY2M"};
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
   
     auto inst_name = op.name().str();
@@ -3503,6 +3478,7 @@ void DecomposemultiPass::runOnOperation() {
     }else if(inst_name == "cu3" && op.getOperands().size() == 5){
       decompose_cu3_gate(op,deadOps);
     }else if(inst_name == "cu1" && op.getOperands().size() == 3){
+      // std::cout << "decompose_cu1_gate: " << inst_name << std::endl;
       decompose_cu1_gate(op,deadOps);
     }else if(inst_name == "cu" && op.getOperands().size() == 6){
       decompose_cu_gate(op,deadOps);
@@ -3548,8 +3524,6 @@ void DecomposemultiPass::runOnOperation() {
       decompose_mcry_gate(op,deadOps);
     }else if(inst_name == "mcrz"){
       decompose_mcrz_gate(op,deadOps);
-    }else if(inst_name == "swap" && op.getOperands().size() == 2){
-      decompose_swap_gate(op,deadOps);
     }else if(inst_name == "dcx" && op.getOperands().size() == 2){
       decompose_dcx_gate(op,deadOps);
     }else if(inst_name == "rzx" && op.getOperands().size() == 3){
