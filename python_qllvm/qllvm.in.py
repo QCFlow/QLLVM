@@ -10,22 +10,13 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
-from codecs import escape_encode
-import sys, uuid, atexit, hashlib
-
-import typing, types
-import re
-import itertools
-from collections import defaultdict
-import os
-from qiskit import QuantumCircuit,transpile
 from qiskit.qasm2 import dumps
-from qiskit_aer import Aer
 from pyqpanda3.intermediate_compiler import convert_qprog_to_qasm,convert_originir_string_to_qprog
 import cirq
-
+import os
 
 def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicgate='', optlevel='0',output_path = '',state = False):
+    qasm_str = ''
     if input == 'qasm' or input == 'qcis':
         qasm_str = circuit
     elif input =='qiskit':
@@ -40,6 +31,8 @@ def compile(circuit,input,out_backend='gasm-backend', backend_config='', basicga
     else:
         raise ValueError(f"Backend {input} not supported")
 
+    if qasm_str == '':
+        raise ValueError(f"The circuit to be compiled is empty.")
     current_dir = os.getcwd()
     origin_file = f"{current_dir}/_temp.qasm"
     with open(origin_file, 'w') as file:

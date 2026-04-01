@@ -188,12 +188,17 @@ def check_qasm_header(file):
         stripped = line.strip()
         if stripped:                     
             non_empty_lines.append(stripped)
-        
-    
-    if len(non_empty_lines) >= 2 and (non_empty_lines[0] == 'OPENQASM 2.0;' or non_empty_lines[0] == 'OPENQASM 3;') and non_empty_lines[1] == 'include "qelib1.inc";':
-        return True
+    if(len(non_empty_lines) < 2):
+        print("Error: The qasm file is incorrect.")
+        return False
+    if(non_empty_lines[0] not in ['OPENQASM 2.0;','OPENQASM 3;','OPENQASM 3.0;']):
+        print("QASM file does not have a valid header,Support OpenQASM 2.0")
+        return False
+    if(non_empty_lines[1] != 'include "qelib1.inc";'):
+        print("QASM file does not have a valid header,not have \"include \"qelib1.inc\";\"")
+        return False
 
-    return False
+    return True
 
 
 fatal_error_verbose = False
@@ -902,11 +907,13 @@ def main(argv=None):
                 lines = result_.splitlines(keepends=True) 
                 if lines:
                     result = ''.join(lines[1:]) 
-
+        if result == '':
+            print("Error: The circuit to be compiled is empty. Please check if it has been saved.")
+            print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
+            exit(1)
             
         if os.path.splitext(filename)[1] == '.qasm' or input_backend == 'originir':
             if not check_qasm_header(result.split('\n')):
-                print("QASM file does not have a valid header,Support OpenQASM 2.0")
                 print(bcolors.BOLD+bcolors.FAIL+'[qllvm] fatal error.'+bcolors.ENDC)
                 exit(1)
             filter_lines = [line for line in result.split('\n')
