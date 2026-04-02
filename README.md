@@ -38,6 +38,14 @@ For more details on how to use QLLVM, please refer to the documentation here: [Q
 
 Method 1: Download from VSCode extension store
 
+<div align="center">
+
+<img src="docs/image/007.png" alt="QLLVM Logo" width="100%"/>
+
+VSCode extension store search
+
+</div>
+
 Cloud VSCode One-click Installation Plugin
 
 Applicable for scenarios where cloud VSCode has access to the extension market, no need to manually download files, one-click installation.
@@ -48,13 +56,7 @@ Applicable for scenarios where cloud VSCode has access to the extension market, 
 3. After installation is complete, the plugins will take effect automatically, and you can directly use intelligent programming, compilation, and execution services.
 ```
 
-<div align="center">
 
-<img src="docs/image/007.png" alt="QLLVM Logo" width="100%"/>
-
-VSCode extension store search
-
-</div>
 
 Method 2: Download plugins from the repository by obtaining vsix files
 
