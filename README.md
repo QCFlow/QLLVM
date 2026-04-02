@@ -38,6 +38,8 @@ For more details on how to use QLLVM, please refer to the documentation here: [Q
 
 Method 1: Download from VSCode extension store
 
+Cloud VSCode One-click Installation Plugin
+
 Applicable for scenarios where cloud VSCode has access to the extension market, no need to manually download files, one-click installation.
 
 ```bash

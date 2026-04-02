@@ -45,7 +45,7 @@ VScode插件商店检索
 
 </div>
 
-适用于云端VSCode已接入插件市场的场景，无需手动下载文件，一键安装。
+云端VSCode一键安装插件
 
 ```bash
 1. 打开云端VSCode左侧「扩展面板」（快捷键：`Ctrl+Shift+X`）；
