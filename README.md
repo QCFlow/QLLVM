@@ -36,10 +36,30 @@ For more details on how to use QLLVM, please refer to the documentation here: [Q
 
 ##### Cloud: Quick installation via VSCode extensions, providing intelligent programming, compilation, and execution services
 
+Method 1: Download from VSCode extension store
+
+Applicable for scenarios where cloud VSCode has access to the extension market, no need to manually download files, one-click installation.
+
+```bash
+1. Open the "Extensions" panel on the left side of cloud VSCode (shortcut: `Ctrl+Shift+X`);
+2. In the extension search box, enter the plugin ID "qcflow-publisher.qcoder-chat", search for the corresponding plugin and click "Install", which will automatically install both qcflow-publisher.qcoder-chat and qcflow-publisher.qcoder-compiler plugins.
+3. After installation is complete, the plugins will take effect automatically, and you can directly use intelligent programming, compilation, and execution services.
+```
+
+<div align="center">
+
+<img src="docs/image/007.png" alt="QLLVM Logo" width="100%"/>
+
+VSCode extension store search
+
+</div>
+
+Method 2: Download plugins from the repository by obtaining vsix files
+
 ```bash
 1. Download the repository to obtain the plugin installation packages:
-    `./plugin/quantum-circuit-composer-0.1.vsix`
-    `./plugin/qcoder-0.1.vsix`
+    `./plugin/qcflow-publisher.qcoder-compiler-0.1.0.vsix`
+    `./plugin/qcflow-publisher.qcoder-chat-0.1.1.vsix`
 2. Open the command palette in VSCode (`Ctrl+Shift+P` / `Cmd+Shift+P`)
 3. Enter and select **Extensions: Install from VSIX...**
 4. Select the downloaded `.vsix` files in sequence to complete installation
