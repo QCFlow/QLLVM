@@ -243,7 +243,7 @@ bool runDecomposeSwapQir(
     basic_Gate_Set = {"swap"};
   }
 
-  if (hasGate(basicGateSet, "swap")) {
+  if (hasGate(basic_Gate_Set, "swap")) {
     keepSwap = true;
   }
   
