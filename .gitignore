@@ -18,3 +18,14 @@
 bell.bc
 bell.o
 hybrid_bell
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+# Local benchmark artifacts (regenerate with run_paper_benchmark.py)
+test/paper_benchmark_out/
+test/paper_benchmark_out_full/
+test/paper_benchmark_full.log
+test/paper_benchmark_out_full.zip
+test/utils.zip
