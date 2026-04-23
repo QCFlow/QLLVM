@@ -1,8 +1,8 @@
 /build
 /.vscode
-/examples
+#/examples
 # /test
-/scripts
+#/scripts
 
 !/examples/hybrid_cuda/
 !/scripts/install_cuda_apt.sh
