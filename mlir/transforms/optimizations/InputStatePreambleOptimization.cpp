@@ -2,7 +2,6 @@
 #include "CommutativeCancellationPass.hpp"
 #include "ConsolidateBlocks.hpp"
 #include "utils/get_matrix.hpp"
-#include "merge_single_gate.hpp"
 #include "gen_qasm.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -124,15 +123,15 @@ void find_block_13(mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::vect
   }
 
   mlir::OpBuilder rewriter(op);
-  op.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
+  op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
   mlir::OpBuilder rewriter3(owner);
-  owner.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter3.getI32Type(), 1));
+  owner.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter3.getI32Type(), 1));
   mlir::OpBuilder rewriter1(next1);
-  next1.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter1.getI32Type(), 1));
+  next1.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter1.getI32Type(), 1));
   mlir::OpBuilder rewriter2(next2);
-  next2.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter2.getI32Type(), 1));
+  next2.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter2.getI32Type(), 1));
   mlir::OpBuilder rewriter4(next3);
-  next3.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter4.getI32Type(), 1));
+  next3.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter4.getI32Type(), 1));
 
   
   block.emplace_back(op);
@@ -158,7 +157,7 @@ void find_block_cx_s0(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::
   auto owner = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(operation);
   if(!owner){
     mlir::OpBuilder rewriter(op);
-    op.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
+    op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
     current_block.emplace_back(op);
     deadOps.emplace_back(op);
   }else{
@@ -265,7 +264,7 @@ void replace_block_13(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_
   mlir::OpBuilder rewriter(cx_2);
   rewriter.setInsertionPointAfter(cx_2);
 
-  auto number1 = cx_1.getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
+  auto number1 = cx_1.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
   auto index_1 = hashTable_find[number1];
   
   angle_3_new = rewriter.create<mlir::ConstantOp>(
@@ -326,9 +325,9 @@ void InputStatePreambleOptimization::runOnOperation() {
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
     idex_two.clear();
     mlir::OpBuilder rewriter(op);
-    op.setAttr(llvm::StringRef("number"),mlir::IntegerAttr::get(rewriter.getI32Type(), counts));
-    op.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
-    op.setAttr(llvm::StringRef("onebit"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
+    op.getOperation()->setAttr(llvm::StringRef("number"),mlir::IntegerAttr::get(rewriter.getI32Type(), counts));
+    op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
+    op.getOperation()->setAttr(llvm::StringRef("onebit"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
 
     if(op.getNumResults() == 1){
       idex_one = OP::getbit_from_valueSemanticsInstOp(op);
@@ -409,15 +408,10 @@ void InputStatePreambleOptimization::runOnOperation() {
           elem.erase();
         }
         
-        // op->getResult(0).replaceAllUsesWith(op.getOperand(0));
-        // op->dropAllUses();
-        // op.erase();
       }
     }
   }
-  // std::cout << "rz_pi start " << rz_pi << std::endl;
-  // std::cout << "ry_pi start " << ry_pi << std::endl;
-  // return;
+
 
   //  update top_op
   topop.clear();
@@ -434,10 +428,10 @@ void InputStatePreambleOptimization::runOnOperation() {
         find_block_cx_s0(op,block_17,deadops);
         if(block_17.size() > 0){
           auto last_op = block_17.back();
-          auto number1 = op.getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
+          auto number1 = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
           auto temp1 = hashTable_find[number1];
 
-          auto number2 = last_op.getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
+          auto number2 = last_op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
           auto temp2 = hashTable_find[number2];
 
           if(temp1 == temp2){
@@ -465,25 +459,21 @@ void InputStatePreambleOptimization::runOnOperation() {
       cx_0_count = cx_0_count_init;
     }
   }
-  // std::cout << "cx  before bit control there is no gate " << cx_0_count << "all delete gates is "<<  delate_cx_count << std::endl;
-  
-  deadops.clear();
-  // auto module_size = merge_single_gate_module(getOperation());
 
-  // auto module = module_size.first;
-  // auto size = module_size.second;
+  deadops.clear();
+
 
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
     mlir::OpBuilder rewriter(op);
-    op.setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
-    op.setAttr(llvm::StringRef("onebit"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
+    op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
+    op.getOperation()->setAttr(llvm::StringRef("onebit"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
   });
 
   topop.clear();
   circuit::getGateCountAndTopOp(before_gate_count, topop, getOperation());
 
   for(auto &op : topop){
-    int selected = op.getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("selected")).getInt();
+    int selected = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("selected")).getInt();
     if(op.getNumResults() == 1 && selected == 0){
       find_block_13(op,block_13,deadops);
     }
