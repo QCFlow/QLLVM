@@ -29,6 +29,7 @@
 #include "utils/circuit.hpp"
 #include "utils/op.hpp"
 #include "ConsolidateBlocks.hpp"
+#include "gen_qasm.hpp"
 
 namespace qllvm {
 void turn_to_phasedx::getDependentDialects(
@@ -41,6 +42,8 @@ void trans_TK1_PhasedX(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir:
   mlir::Value inputQubit = op.getOperand(0);
   mlir::Type qubit_type = inputQubit.getType();
 
+  // TK1 operands follow simplified_seq order [Rz(euler[2]), Rx(euler[0]), Rz(euler[1])], stored as
+  // radians/pi. Tk convention TK1(α,β,γ) ≡ Rz(α)Rx(β)Rz(γ) maps α→operand 3, β→operand 2, γ→operand 1.
   mlir::Value alpha_v = op.getOperand(1);
   mlir::Value beta_v = op.getOperand(2);
   mlir::Value gamma_v = op.getOperand(3);
@@ -48,29 +51,22 @@ void trans_TK1_PhasedX(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir:
   auto alpha = qllvm::OP::tryGetConstAngle(alpha_v);
   auto beta = qllvm::OP::tryGetConstAngle(beta_v);
   auto gamma = qllvm::OP::tryGetConstAngle(gamma_v);
-
   std::vector<mlir::Value> params_values;
   mlir::OpBuilder rewriter(op);
   rewriter.setInsertionPointAfter(op);
 
-  mlir::Value neg_one_v = rewriter.create<mlir::ConstantOp>(
-                          op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), -1));
-
-  mlir::Value theta1_v = rewriter.create<mlir::ConstantOp>(
-                          op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), (alpha-gamma)/2.0));
-  mlir::Value theta2_v = rewriter.create<mlir::ConstantOp>(
-                          op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), (1+beta)));
-
+  mlir::Value theta_v = rewriter.create<mlir::ConstantOp>(
+                            op.getLoc(), mlir::FloatAttr::get(rewriter.getF64Type(), (alpha+gamma)));
   
   auto new_inst = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
                       op.getLoc(), llvm::makeArrayRef({qubit_type}),
-                      "phasedx", llvm::makeArrayRef({inputQubit}),
-                      llvm::makeArrayRef({neg_one_v,theta1_v}));
+                      "rz", llvm::makeArrayRef({inputQubit}),
+                      llvm::makeArrayRef({theta_v}));
   inputQubit = new_inst.getResult(0);
   auto new_inst2 = rewriter.create<mlir::quantum::ValueSemanticsInstOp>(
                       op.getLoc(), llvm::makeArrayRef({qubit_type}),
                       "phasedx", llvm::makeArrayRef({inputQubit}),
-                      llvm::makeArrayRef({theta2_v,alpha_v}));
+                      llvm::makeArrayRef({beta_v,gamma_v}));
   inputQubit = new_inst2.getResult(0);
   
   op.getResult(0).replaceAllUsesWith(inputQubit);
@@ -91,24 +87,18 @@ void turn_run_to_tk1(std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::
   }
 
   std::vector<std::string> basis_names = {"ZXZ"};
-
   std::vector<qllvm::utils::EulerBasis> target_basis_set;
-  
-
   for(int i = 0;i < basis_names.size();i++){
       auto basis = qllvm::utils::euler_Basis_FromStr(basis_names[i]);
       target_basis_set.emplace_back(basis);
   }
+  auto first = run.front();
+  auto last = run.back();
 
   auto simplified_seq = qllvm::utils::leastcost_basis(total_mat,target_basis_set);
   if(simplified_seq.size() == 0){
-    auto first = run.front();
-    auto last = run.back();
     mlir::Value inputQubit = first->getOperand(0);
     last->getResult(0).replaceAllUsesWith(inputQubit);
-    for (auto &op_to_delete : run) {
-      deadOps.emplace_back(op_to_delete);
-    }
     return;
   }
 
@@ -142,9 +132,6 @@ void turn_run_to_tk1(std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::
       params.emplace_back(0.0);
     }
   }
-
-  auto last = run.back();
-  auto first = run.front();
 
   mlir::OpBuilder rewriter(last);
   rewriter.setInsertionPointAfter(last);
@@ -194,7 +181,6 @@ void turn_to_phasedx::runOnOperation() {
     op->dropAllUses();
     op.erase();
   }
-
 }
 } // namespace qllvm
 
