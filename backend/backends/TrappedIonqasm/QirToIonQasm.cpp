@@ -404,7 +404,7 @@ bool emitInstruction(CallInst* CI, const QubitMap& qubitMap,
   Function* Callee = CI->getCalledFunction();
   if (!Callee) return true;  // skip indirect calls
   StringRef name = Callee->getName();
-
+    
   if (!name.startswith("__quantum__qis__")) return true;
 
   auto prependIf = [&]() {
@@ -426,14 +426,30 @@ bool emitInstruction(CallInst* CI, const QubitMap& qubitMap,
     }
     return q >= 0;
   }
+  if (name == "__quantum__qis__rz") {
+    double theta = getConstantDouble(CI->getArgOperand(0));
+    int q = getQubitIndex(CI->getArgOperand(1), qubitMap);
+    if (q >= 0) {
+      out << "rz(" << std::setprecision(17) << theta << "*pi) q[" << q << "];\n";
+    }
+    return q >= 0;
+  }
+
+  //   phased_x(target: qubit, angle(-0.5), angle(0.5))
+  // zz_phase(control: qubit, target: qubit, angle(0.5))
+  // rz(control: qubit, angle(-0.5))
+  // phased_x(target: qubit, angle(0.5), angle(1))
+  // rz(target: qubit, angle(-0.5))
   
   if (name == "__quantum__qis__cnot") {
     int q0 = getQubitIndex(CI->getArgOperand(0), qubitMap);
     int q1 = getQubitIndex(CI->getArgOperand(1), qubitMap);
     if(q0 >= 0 && q1 >= 0){
-      out << "U1q ( 2.5*pi, 0.5*pi) q[" << q1 << "];\n";
-      out << "RZZ (0.5*pi) q[" << q0 << "], q[" << q1 << "];\n";
-      out << "U1q (0.5*pi, 0.0*pi) q[" << q1 << "];\n";
+      out << "U1q (-0.5*pi,0.5*pi) q[" << q1 << "];\n";
+      out << "rzz (0.5*pi) q[" << q0 << "], q[" << q1 << "];\n";
+      out << "rz(-0.5*pi) q[" << q0 << "];\n";
+      out << "U1q (0.5*pi, pi) q[" << q1 << "];\n";
+      out << "rz(-0.5*pi) q[" << q1 << "];\n"; 
     }
     return q0 >= 0 && q1 >= 0;
   }
