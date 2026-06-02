@@ -44,6 +44,7 @@ if(CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")
 endif()
 
 option(QLLVM_BUILD_TESTS "Build qllvm tests" OFF)
+option(QLLVM_ENABLE_MPI "Build MPI hybrid runtime (libqllvm-mpi-runtime)" ON)
 
 # OpenQASM / MLIR parsers: antlr4-runtime, exprtk, Eigen3 (system paths or QLLVM_DEPS_PREFIX)
 set(QLLVM_DEPS_PREFIX "" CACHE PATH "Optional prefix with include/ and lib/ (antlr4-runtime, exprtk headers)")

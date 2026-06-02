@@ -41,6 +41,9 @@ int qir_runner_last_histogram_size(void);
 int qir_runner_last_histogram_get(int index, char *bitstring_out, size_t bitstring_cap,
                                     int *count_out);
 
+/** Replace the in-memory histogram (used after MPI broadcast to non-root ranks). */
+void qir_runner_load_histogram(int n, const char *const *bitstrings, const int *counts);
+
 #ifdef __cplusplus
 }
 #endif

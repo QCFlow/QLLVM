@@ -1,0 +1,5 @@
+experiment,K,T_build_unified_mpi_s,T_build_split_mpi_s,build_ratio_split_over_uni,T_runtime_mpi_s,N_cmd_unified,N_cmd_split,L_glue_split
+mpi_kernel_count,1,1.6295,2.4273,1.4897,1.1862,1,7,5
+mpi_kernel_count,2,1.6595,2.6485,1.5959,1.2599,1,8,9
+mpi_kernel_count,4,1.6211,3.0783,1.8989,1.2698,1,10,17
+mpi_kernel_count,8,1.6374,3.8354,2.3424,1.3079,1,14,33

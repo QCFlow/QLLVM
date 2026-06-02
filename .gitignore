@@ -18,3 +18,14 @@
 bell.bc
 bell.o
 hybrid_bell
+
+# MPI hybrid example build outputs
+/examples/hybrid_mpi*/
+/examples/hybrid_mpi*/*.bc
+/examples/hybrid_mpi/mpi_bell*
+/examples/hybrid_mpi_cuda/mpi_cuda_app
+/examples/hybrid_mpi_hardware/mpi_hw
+/examples/hybrid_mpi_llvm/mpi_llvm
+/examples/hybrid_mpi_policy/mpi_policy*
+/examples/hybrid_mpi_rankmap/mpi_rankmap
+/examples/hybrid_mpi_vqe/mpi_vqe_app

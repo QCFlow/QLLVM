@@ -3,7 +3,8 @@
 OPENQASM_ONLY_BUILD = True
 
 
-import argparse, sys, os, glob, subprocess, mimetypes, re, pathlib,time
+import argparse, sys, os, glob, subprocess, mimetypes, re, pathlib, time, hashlib, shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class bcolors:
     HEADER = '\033[95m'
@@ -261,6 +262,50 @@ def main(argv=None):
         fatal_error_verbose = True
         sys.argv.remove('-fatal-error-verbose')
 
+    use_mpi = False
+    mpi_wrapper = None
+    if '-mpi' in sys.argv[1:]:
+        use_mpi = True
+        sys.argv.remove('-mpi')
+    if '-mpi-wrapper' in sys.argv[1:]:
+        idx = sys.argv.index('-mpi-wrapper')
+        mpi_wrapper = sys.argv[idx + 1]
+        sys.argv.remove('-mpi-wrapper')
+        sys.argv.remove(mpi_wrapper)
+
+    mpi_mode = 'sim'
+    if '-mpi-mode' in sys.argv[1:]:
+        idx = sys.argv.index('-mpi-mode')
+        mpi_mode = sys.argv[idx + 1]
+        sys.argv.remove('-mpi-mode')
+        sys.argv.remove(mpi_mode)
+        if mpi_mode not in ('sim', 'hardware', 'llvm'):
+            print(bcolors.FAIL + '[qllvm] -mpi-mode must be sim, hardware, or llvm.' + bcolors.ENDC, file=sys.stderr)
+            exit(1)
+
+    rank_kernel_map = {}
+    if '-rank-kernel-map' in sys.argv[1:]:
+        idx = sys.argv.index('-rank-kernel-map')
+        map_str = sys.argv[idx + 1]
+        sys.argv.remove('-rank-kernel-map')
+        sys.argv.remove(map_str)
+        for part in map_str.split(','):
+            part = part.strip()
+            if not part or ':' not in part:
+                continue
+            rank_s, kernel = part.split(':', 1)
+            rank_kernel_map[int(rank_s.strip())] = kernel.strip()
+
+    mpiq_config = None
+    if '-mpiq-config' in sys.argv[1:]:
+        idx = sys.argv.index('-mpiq-config')
+        mpiq_config = sys.argv[idx + 1]
+        sys.argv.remove('-mpiq-config')
+        sys.argv.remove(mpiq_config)
+        if not os.path.isfile(mpiq_config):
+            print(bcolors.FAIL + '[qllvm] -mpiq-config file not found: ' + mpiq_config + bcolors.ENDC, file=sys.stderr)
+            exit(1)
+
     if '-h' in sys.argv[1:] or '--help' in sys.argv[1:]:
         import argparse
         parser = argparse.ArgumentParser(description="qllvm: quantum LLVM compiler (OpenQASM, QIR, hybrid)",
@@ -271,6 +316,15 @@ def main(argv=None):
         parser.add_argument('-fatal-error-verbose', metavar='',
                         help='turn on verbose mode for fatal error.')
         parser.add_argument('-qpu', metavar=('name[:backend]'), help='specify quantum backend name (e.g. qasm-backend, qir-runner).')
+        parser.add_argument('-mpi', action='store_true',
+                        help='MPI hybrid compile: mpicxx link (sim/hardware/llvm modes; add .cu for CUDA in sim).')
+        parser.add_argument('-mpi-mode', metavar='sim|hardware|llvm', default='sim',
+                        help='MPI hybrid mode: sim (qir-runner), hardware (qasm-backend+mock MPIQ), llvm (in-process QIR).')
+        parser.add_argument('-mpi-wrapper', metavar='mpicxx', help='MPI C++ compiler wrapper (default: QLLVM_MPI_WRAPPER or mpicxx).')
+        parser.add_argument('-rank-kernel-map', metavar='0:bell,1:vqe',
+                        help='Per-rank quantum kernel map for MPI sim builds (each rank runs its kernel locally).')
+        parser.add_argument('-mpiq-config', metavar='config.json',
+                        help='MPIQ hardware config (hardware mode; optional for mock runtime).')
         parser.add_argument('-qpu-config',help='specify file name containing backend qpu configuration.')
         parser.add_argument('-sabre-cpp',help='use C++ SABRE mapping at LLVM IR stage instead of Qiskit (requires -initial-mapping -qpu-config with qasm-backend).')
         parser.add_argument('-kernel',help='specify domain-specific kernel algorithm, use specific optimization methods for kernel circuits.')
@@ -290,6 +344,8 @@ def main(argv=None):
         parser.add_argument('-qllvm-install', metavar='', help='returns the install directory for qllvm.')
         parser.add_argument('-pythonpath', metavar='', help='print the correct PYTHONPATH to leverage qllvm python API.')
         parser.add_argument('-keep-llvm-file', metavar='', help='keep intermediate LLVM files.')
+        parser.add_argument('-no-bc-cache', action='store_true',
+                        help='Disable content-addressed .bc cache for hybrid QASM compilation.')
         parser.add_argument('-print-final-submission', metavar='', help='print the final quantum circuit for backend submission (ignored in FTQC).')
         parser.add_argument('-print-csp-source', metavar='', help='print the result of the Clang Syntax Handler.')
         parser.add_argument('-install-plugin', nargs=1, help='Install the plugin at the given git repository URL. Usage -install-plugin URL.')
@@ -457,41 +513,16 @@ def main(argv=None):
                     shots = int(sys.argv[idx])
                 except ValueError:
                     pass
-        
-        # 1. Compile each QASM to .bc (qir-runner backend)
-        bc_files = []
-        for qasm_file in qasm_files:
-            base = os.path.splitext(os.path.basename(qasm_file))[0]
-            bc_path = os.path.join(work_dir, base + '.bc')
-            preproc_cmd = [cxx_compiler, '-x', 'c++', '-E', '-P', qasm_file]
-            try:
-                result = subprocess.check_output(preproc_cmd).decode('ascii')
-            except Exception:
-                result = open(qasm_file, 'r').read()
-            if os.path.splitext(qasm_file)[1] == '.qasm':
-                filter_lines = [line for line in result.split('\n')
-                    if 'OPENQASM' not in line and len(line) > 0]
-                text = 'OPENQASM 3;\n' + '\n'.join(filter_lines)
-            else:
-                text = result
-            tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
-            with open(tmp_qasm, 'w') as f:
-                f.write(text)
-            cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
-                   '-emit-backend=qir-runner', '-output-path=' + bc_path]
 
-            if '-basicgate' in str(sys.argv):
-                for a in sys.argv[1:]:
-                    if '-basicgate' in a:
-                        cmd.append(a)
-                        break
-            else:
-                cmd.append('-basicgate=[rx,ry,rz,cz,h,x,y,z]')
-            if verbose:
-                info(' '.join(cmd))
-            subprocess.run(cmd, check=True, env=run_env)
-            os.remove(tmp_qasm)
-            bc_files.append((base, bc_path))
+        def stage_qasm():
+            return _compile_qasm_files_parallel(
+                qasm_files,
+                lambda qf: _compile_qasm_to_bc(qf, qllvm_tool, cxx_compiler, work_dir, run_env, opt_level))
+
+        def stage_cpp():
+            return _compile_hybrid_cpp_objects(cpp_files, work_dir, cxx_compiler, _qir_rt_inc)
+
+        bc_files, cpp_objs = _run_compile_stages_parallel([stage_qasm, stage_cpp])
 
         # 2. Generate kernel stubs that call qir_runner_execute
         stub_cpp = os.path.join(work_dir, '__qir_runner_kernels.cpp')
@@ -504,18 +535,7 @@ def main(argv=None):
                 f.write('}\n\n')
         stub_o = os.path.join(work_dir, '__qir_runner_kernels.o')
 
-        # 3. Compile C++ sources (use g++ when available for ~10x faster compile)
-        cpp_objs = []
-        for cpp_file in cpp_files:
-            base = os.path.splitext(os.path.basename(cpp_file))[0]
-            o_path = os.path.join(work_dir, base + '_classical.o')
-            cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc + ['-o', o_path, cpp_file]
-            if verbose:
-                info(' '.join(cmd))
-            subprocess.run(cmd, check=True)
-            cpp_objs.append(o_path)
-
-        # 4. Compile kernel stubs
+        # 3. Compile kernel stubs
         cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc + ['-o', stub_o, stub_cpp]
         if verbose:
             info(' '.join(cmd))
@@ -550,12 +570,8 @@ def main(argv=None):
             info('Hybrid (qir-runner) executable: {}. Run with: {} -shots {}'.format(exe_name, exe_name, shots))
         return exe_name
 
-    # Phase 1: C++ + CUDA + QASM hybrid compilation (qir-runner for quantum)
-    def compile_hybrid_cuda_quantum(cpp_files, cu_files, qasm_files, output_exe=None):
-        """Compile C++ + CUDA + QASM to exe: CUDA kernels + qir-runner for quantum."""
-        _shutil = __import__('shutil')
-        cxx_compiler = _shutil.which('g++') or _shutil.which('gcc') or compiler
-        llvm_bin_path = str(pathlib.Path(compiler).parent)
+    def _resolve_qllvm_compile_tool():
+        """Return (qllvm_compile_path, build_base_or_none)."""
         qllvm_tool = '@CMAKE_INSTALL_PREFIX@/bin/qllvm-compile'
         build_base = None
         if not os.path.exists(qllvm_tool):
@@ -565,16 +581,167 @@ def main(argv=None):
                     qllvm_tool = build_tool
                     build_base = os.path.join(base, 'build')
                     break
+        return qllvm_tool, build_base
+
+    def _qllvm_compile_run_env(build_base):
         run_env = os.environ.copy()
         if build_base:
             lib_paths = [os.path.join(build_base, 'lib'), os.path.join(build_base, 'mlir', 'parsers', 'qiskit'),
                         os.path.join(build_base, 'mlir', 'parsers', 'qasm3'), os.path.join(build_base, 'mlir', 'dialect')]
             run_env['LD_LIBRARY_PATH'] = ':'.join(lib_paths) + (':' + run_env.get('LD_LIBRARY_PATH', ''))
-        work_dir = os.getcwd()
-        _qir_rt_inc_cuda = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm', '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@']
-        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+        return run_env
 
-        # Parse CUDA options
+    def _preprocess_qasm_file(qasm_file, cxx_compiler):
+        preproc_cmd = [cxx_compiler, '-x', 'c++', '-E', '-P', qasm_file]
+        try:
+            result = subprocess.check_output(preproc_cmd).decode('ascii')
+        except Exception:
+            result = open(qasm_file, 'r').read()
+        if os.path.splitext(qasm_file)[1] == '.qasm':
+            filter_lines = [line for line in result.split('\n')
+                if 'OPENQASM' not in line and len(line) > 0]
+            return 'OPENQASM 3;\n' + '\n'.join(filter_lines)
+        return result
+
+    def _hybrid_basicgate_arg():
+        if '-basicgate' in str(sys.argv):
+            for a in sys.argv[1:]:
+                if '-basicgate' in a:
+                    return a
+        return '-basicgate=[rx,ry,rz,cz,h,x,y,z]'
+
+    def _bc_cache_enabled():
+        return '-no-bc-cache' not in sys.argv
+
+    def _bc_cache_dir():
+        return os.environ.get(
+            'QLLVM_BC_CACHE',
+            os.path.join(os.path.expanduser('~'), '.qllvm', 'cache', 'bc'))
+
+    def _bc_cache_key(text, opt_level, basicgate, backend):
+        payload = '\n'.join([backend, opt_level, basicgate, text])
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def _bc_cache_lookup(cache_key, bc_path, kernel_name):
+        if not _bc_cache_enabled():
+            return False
+        cached_bc = os.path.join(_bc_cache_dir(), cache_key + '.bc')
+        if os.path.isfile(cached_bc):
+            __import__('shutil').copy2(cached_bc, bc_path)
+            if verbose:
+                info('bc cache hit for {} ({})'.format(kernel_name, cache_key[:12]))
+            return True
+        return False
+
+    def _bc_cache_store(cache_key, bc_path):
+        if not _bc_cache_enabled() or not os.path.isfile(bc_path):
+            return
+        cache_dir = _bc_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        cached_bc = os.path.join(cache_dir, cache_key + '.bc')
+        tmp_bc = cached_bc + '.tmp.' + str(os.getpid())
+        _shutil_mod = __import__('shutil')
+        _shutil_mod.copy2(bc_path, tmp_bc)
+        os.replace(tmp_bc, cached_bc)
+
+    def _run_compile_stages_parallel(stage_fns):
+        """Run independent compile stages in parallel; None entries are skipped."""
+        indexed = [(i, fn) for i, fn in enumerate(stage_fns) if fn is not None]
+        results = [None] * len(stage_fns)
+        if not indexed:
+            return results
+        if len(indexed) == 1:
+            i, fn = indexed[0]
+            results[i] = fn()
+            return results
+        with ThreadPoolExecutor(max_workers=len(indexed)) as pool:
+            future_map = {pool.submit(fn): i for i, fn in indexed}
+            for fut in as_completed(future_map):
+                results[future_map[fut]] = fut.result()
+        return results
+
+    def _compile_hybrid_cu_objects(cu_files, work_dir, cuda_arch, nvcc_path, clang_compiler, cuda_path):
+        cu_objs = []
+        for cu_file in cu_files:
+            base = os.path.splitext(os.path.basename(cu_file))[0]
+            o_path = os.path.join(work_dir, base + '_cuda.o')
+            if nvcc_path:
+                cmd = [nvcc_path, '-x', 'cu', '-c', cu_file, '-o', o_path, '-arch=' + cuda_arch]
+            else:
+                cmd = [clang_compiler, '-x', 'cuda', '-c', cu_file, '-o', o_path,
+                       '--cuda-gpu-arch=' + cuda_arch, '--cuda-path=' + cuda_path, '-I/usr/include']
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cu_objs.append(o_path)
+        return cu_objs
+
+    def _compile_hybrid_cpp_objects(cpp_files, work_dir, cxx_compiler, include_flags,
+                                    extra_compile_flags=None, obj_suffix='_classical.o'):
+        extra_compile_flags = extra_compile_flags or []
+        cpp_objs = []
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            o_path = os.path.join(work_dir, base + obj_suffix)
+            cmd = ([cxx_compiler, '-c', '-std=c++17'] + extra_compile_flags +
+                   include_flags + ['-o', o_path, cpp_file])
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cpp_objs.append(o_path)
+        return cpp_objs
+
+    def _compile_qasm_to_bc(qasm_file, qllvm_tool, cxx_compiler, work_dir, run_env, opt_level):
+        base = os.path.splitext(os.path.basename(qasm_file))[0]
+        bc_path = os.path.join(work_dir, base + '.bc')
+        text = _preprocess_qasm_file(qasm_file, cxx_compiler)
+        basicgate = _hybrid_basicgate_arg()
+        cache_key = _bc_cache_key(text, opt_level, basicgate, 'qir-runner')
+        if _bc_cache_lookup(cache_key, bc_path, base):
+            return base, bc_path
+
+        tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
+        with open(tmp_qasm, 'w') as f:
+            f.write(text)
+        cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
+               '-emit-backend=qir-runner', '-output-path=' + bc_path, basicgate]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True, env=run_env)
+        os.remove(tmp_qasm)
+        _bc_cache_store(cache_key, bc_path)
+        return base, bc_path
+
+    def _find_static_library(lib_name, build_base, subdir=''):
+        lib_dir = '@CMAKE_INSTALL_PREFIX@/lib'
+        candidates = []
+        if build_base and subdir:
+            candidates.append(os.path.join(build_base, subdir, lib_name))
+        candidates.extend([
+            os.path.join(lib_dir, lib_name),
+            os.path.join(os.path.expanduser('~'), '.qllvm', 'lib', lib_name),
+        ])
+        for cand in candidates:
+            if cand and os.path.exists(cand):
+                return cand
+        return None
+
+    def _resolve_mpi_compiler(mpi_wrapper):
+        _shutil = __import__('shutil')
+        if not mpi_wrapper:
+            mpi_wrapper = os.environ.get('QLLVM_MPI_WRAPPER') or _shutil.which('mpicxx') or _shutil.which('mpic++')
+        if not mpi_wrapper:
+            raise RuntimeError('MPI wrapper not found. Install OpenMPI/MPICH or set QLLVM_MPI_WRAPPER.')
+
+        def mpi_flags(flag):
+            try:
+                return subprocess.check_output([mpi_wrapper, flag], text=True).strip().split()
+            except Exception:
+                return []
+
+        return mpi_wrapper, mpi_flags('--showme:compile'), mpi_flags('--showme:link')
+
+    def _parse_cuda_options(_shutil):
         cuda_arch = 'sm_75'
         if '-cuda-arch' in sys.argv[1:]:
             idx = sys.argv.index('-cuda-arch') + 1
@@ -587,7 +754,6 @@ def main(argv=None):
                 cuda_path = sys.argv[idx]
         if not cuda_path:
             cuda_path = '/usr/local/cuda'
-        # 未显式指定时：apt 安装的 CUDA 布局与 Clang 不符，优先用 install_cuda_apt.sh 创建的兼容层
         apt_compat = os.path.join(os.path.expanduser('~'), '.qllvm', 'cuda-apt-compat')
         if not cuda_path or cuda_path == '/usr' or not os.path.isdir(cuda_path):
             if os.path.isdir(apt_compat):
@@ -598,55 +764,251 @@ def main(argv=None):
                 cuda_path = os.path.dirname(os.path.dirname(nvcc))
             if not os.path.isdir(cuda_path):
                 raise FileNotFoundError('CUDA path not found: {}. Set CUDA_PATH or use -cuda-path.'.format(cuda_path))
-
-        # 1. Compile .cu -> .o (优先 nvcc，clang -x cuda 在 apt 环境下易有 include 问题)
-        cu_objs = []
         nvcc_path = _shutil.which('nvcc')
-        for cu_file in cu_files:
-            base = os.path.splitext(os.path.basename(cu_file))[0]
-            o_path = os.path.join(work_dir, base + '_cuda.o')
-            if nvcc_path:
-                cmd = [nvcc_path, '-x', 'cu', '-c', cu_file, '-o', o_path, '-arch=' + cuda_arch]
+        # Keep nvcc and lib64 from the same toolkit root when possible.
+        if nvcc_path:
+            nvcc_root = os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
+            if os.path.isdir(os.path.join(nvcc_root, 'lib64')):
+                cuda_path = nvcc_root
+        return cuda_arch, cuda_path, nvcc_path
+
+    def _mpi_link_flags_for_nvcc(mpi_link_flags):
+        out = []
+        for flag in mpi_link_flags:
+            if flag.startswith('-L') or flag.startswith('-Wl,'):
+                out.append(flag)
+            elif flag == '-pthread':
+                out.extend(['-Xcompiler', '-pthread'])
+            elif flag.startswith('-l'):
+                out.extend(['-Xlinker', flag])
             else:
-                cmd = [compiler, '-x', 'cuda', '-c', cu_file, '-o', o_path,
-                       '--cuda-gpu-arch=' + cuda_arch, '--cuda-path=' + cuda_path, '-I/usr/include']
-            if verbose:
-                info(' '.join(cmd))
-            subprocess.run(cmd, check=True)
-            cu_objs.append(o_path)
+                out.extend(['-Xlinker', flag])
+        return out
 
-        # 2. Compile .cpp -> .o
-        cpp_objs = []
-        for cpp_file in cpp_files:
-            base = os.path.splitext(os.path.basename(cpp_file))[0]
-            o_path = os.path.join(work_dir, base + '_classical.o')
-            cmd = [cxx_compiler, '-c', '-std=c++17'] + _qir_rt_inc_cuda + ['-o', o_path, cpp_file]
-            if verbose:
-                info(' '.join(cmd))
-            subprocess.run(cmd, check=True)
-            cpp_objs.append(o_path)
+    def _compile_qasm_files_parallel(qasm_files, compile_fn):
+        if len(qasm_files) <= 1:
+            return [compile_fn(qf) for qf in qasm_files]
+        max_workers = min(len(qasm_files), os.cpu_count() or 4)
+        results = [None] * len(qasm_files)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {pool.submit(compile_fn, qf): i for i, qf in enumerate(qasm_files)}
+            for fut in as_completed(future_map):
+                results[future_map[fut]] = fut.result()
+        return results
 
-        # 3. Compile QASM -> .bc and generate stubs (qir-runner path)
-        bc_files = []
-        for qasm_file in qasm_files:
-            base = os.path.splitext(os.path.basename(qasm_file))[0]
-            bc_path = os.path.join(work_dir, base + '.bc')
-            preproc_cmd = [cxx_compiler, '-x', 'c++', '-E', '-P', qasm_file]
+    def _compile_qasm_to_hardware_qasm(qasm_file, qllvm_tool, cxx_compiler, work_dir, run_env, opt_level):
+        base = os.path.splitext(os.path.basename(qasm_file))[0]
+        out_path = os.path.join(work_dir, base + '_compiled.qasm')
+        text = _preprocess_qasm_file(qasm_file, cxx_compiler)
+        tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
+        with open(tmp_qasm, 'w') as f:
+            f.write(text)
+        cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qasm-backend', opt_level,
+               '-emit-backend=qasm-backend', '-output-path=' + out_path,
+               '-internal-func-name', base]
+        if '-basicgate' in str(sys.argv):
+            for a in sys.argv[1:]:
+                if '-basicgate' in a:
+                    cmd.append(a)
+                    break
+        else:
+            cmd.append('-basicgate=[rx,ry,rz,cz,h,x,y,z]')
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True, env=run_env)
+        os.remove(tmp_qasm)
+        return base, out_path
+
+    def _generate_mpi_qir_stub(stub_cpp, bc_files, rank_kernel_map=None):
+        with open(stub_cpp, 'w') as f:
+            f.write('/* Auto-generated MPI kernel stubs for qir-runner hybrid */\n')
+            f.write('#include <mpi.h>\n')
+            f.write('#include "qllvm-mpi-runtime.h"\n\n')
+            for base, _ in bc_files:
+                f.write('extern "C" void __internal_mlir_{}() {{\n'.format(base))
+                f.write('  qllvm_mpi_execute_kernel("{}", 0);\n'.format(base))
+                f.write('}\n\n')
+            if rank_kernel_map:
+                f.write('extern "C" void qllvm_mpi_dispatch_by_rank() {\n')
+                f.write('  int rank = 0;\n')
+                f.write('  MPI_Comm_rank(MPI_COMM_WORLD, &rank);\n')
+                for r in sorted(rank_kernel_map.keys()):
+                    k = rank_kernel_map[r]
+                    f.write('  if (rank == {}) qllvm_mpi_execute_kernel_local("{}", 0);\n'.format(r, k))
+                f.write('}\n\n')
+
+    def _generate_mpi_hardware_stub(stub_cpp, compiled_qasm_files, mpiq_config_path=None):
+        cfg = mpiq_config_path if mpiq_config_path else ''
+        with open(stub_cpp, 'w') as f:
+            f.write('/* Auto-generated MPIQ hardware stubs (mock runtime) */\n')
+            f.write('#include "qllvm-mpiq-runtime.h"\n\n')
+            for base, qasm_path in compiled_qasm_files:
+                f.write('extern "C" void __internal_mlir_{}() {{\n'.format(base))
+                f.write('  qllvm_mpiq_execute("{}", "{}", "{}");\n'.format(base, qasm_path, cfg))
+                f.write('}\n\n')
+
+    # P0: MPI + C++ + QASM hybrid (qir-runner, no CUDA)
+    def compile_hybrid_mpi(cpp_files, qasm_files, output_exe=None, mpi_wrapper=None):
+        """Compile MPI C++ + QASM: rank-0 qir-runner execute + collective histogram sync."""
+        _shutil = __import__('shutil')
+        mpi_wrapper, mpi_compile_flags, mpi_link_flags = _resolve_mpi_compiler(mpi_wrapper)
+
+        qllvm_tool, build_base = _resolve_qllvm_compile_tool()
+        run_env = _qllvm_compile_run_env(build_base)
+        work_dir = os.getcwd()
+        _hybrid_inc = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm',
+                       '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@',
+                       '-I', '@QLLVM_MPI_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+        shots = 1024
+        if '-shots' in sys.argv[1:]:
+            idx = sys.argv.index('-shots') + 1
+            if idx < len(sys.argv):
+                try:
+                    shots = int(sys.argv[idx])
+                except ValueError:
+                    pass
+
+        bc_files, cpp_objs = _run_compile_stages_parallel([
+            lambda: _compile_qasm_files_parallel(
+                qasm_files,
+                lambda qf: _compile_qasm_to_bc(qf, qllvm_tool, mpi_wrapper, work_dir, run_env, opt_level)),
+            lambda: _compile_hybrid_cpp_objects(
+                cpp_files, work_dir, mpi_wrapper, _hybrid_inc, mpi_compile_flags),
+        ])
+
+        stub_cpp = os.path.join(work_dir, '__qir_runner_mpi_kernels.cpp')
+        _generate_mpi_qir_stub(stub_cpp, bc_files, rank_kernel_map if rank_kernel_map else None)
+        stub_o = os.path.join(work_dir, '__qir_runner_mpi_kernels.o')
+
+        cmd = [mpi_wrapper, '-c', '-std=c++17'] + mpi_compile_flags + _hybrid_inc + ['-o', stub_o, stub_cpp]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True)
+
+        exe_name = output_exe if output_exe else 'hybrid_mpi_app'
+        qir_rt_a = _find_static_library('libqir-runner-runtime.a', build_base,
+                                        'mlir/qir_runner_runtime')
+        mpi_rt_a = _find_static_library('libqllvm-mpi-runtime.a', build_base,
+                                          'mlir/qllvm_mpi_runtime')
+        if not qir_rt_a:
+            raise FileNotFoundError('libqir-runner-runtime.a not found. Build qllvm with ninja install.')
+        if not mpi_rt_a:
+            raise FileNotFoundError('libqllvm-mpi-runtime.a not found. Build qllvm with -DQLLVM_ENABLE_MPI=ON and ninja install.')
+
+        link_cmd = ([mpi_wrapper, '-o', exe_name] + cpp_objs + [stub_o, mpi_rt_a, qir_rt_a]
+                    + mpi_link_flags)
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        for f in [stub_cpp, stub_o] + cpp_objs:
             try:
-                result = subprocess.check_output(preproc_cmd).decode('ascii')
-            except Exception:
-                result = open(qasm_file, 'r').read()
-            if os.path.splitext(qasm_file)[1] == '.qasm':
-                filter_lines = [line for line in result.split('\n')
-                    if 'OPENQASM' not in line and len(line) > 0]
-                text = 'OPENQASM 3;\n' + '\n'.join(filter_lines)
-            else:
-                text = result
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid MPI (qir-runner) executable: {}. Run with: mpirun -np <N> {} -shots {}'.format(
+                exe_name, exe_name, shots))
+        return exe_name
+
+    # P2: MPI + C++ + CUDA + QASM hybrid (qir-runner)
+    def compile_hybrid_mpi_cuda(cpp_files, cu_files, qasm_files, output_exe=None, mpi_wrapper=None):
+        """Compile MPI C++ + CUDA + QASM: nvcc CUDA kernels + collective qir-runner."""
+        _shutil = __import__('shutil')
+        mpi_wrapper, mpi_compile_flags, mpi_link_flags = _resolve_mpi_compiler(mpi_wrapper)
+        cuda_arch, cuda_path, nvcc_path = _parse_cuda_options(_shutil)
+
+        qllvm_tool, build_base = _resolve_qllvm_compile_tool()
+        run_env = _qllvm_compile_run_env(build_base)
+        work_dir = os.getcwd()
+        _hybrid_inc = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm',
+                       '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@',
+                       '-I', '@QLLVM_MPI_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+        shots = 1024
+        if '-shots' in sys.argv[1:]:
+            idx = sys.argv.index('-shots') + 1
+            if idx < len(sys.argv):
+                try:
+                    shots = int(sys.argv[idx])
+                except ValueError:
+                    pass
+
+        cu_objs, bc_files, cpp_objs = _run_compile_stages_parallel([
+            lambda: _compile_hybrid_cu_objects(
+                cu_files, work_dir, cuda_arch, nvcc_path, compiler, cuda_path),
+            lambda: _compile_qasm_files_parallel(
+                qasm_files,
+                lambda qf: _compile_qasm_to_bc(qf, qllvm_tool, mpi_wrapper, work_dir, run_env, opt_level)),
+            lambda: _compile_hybrid_cpp_objects(
+                cpp_files, work_dir, mpi_wrapper, _hybrid_inc, mpi_compile_flags),
+        ])
+
+        stub_cpp = os.path.join(work_dir, '__qir_runner_mpi_kernels.cpp')
+        _generate_mpi_qir_stub(stub_cpp, bc_files, rank_kernel_map if rank_kernel_map else None)
+        stub_o = os.path.join(work_dir, '__qir_runner_mpi_kernels.o')
+
+        cmd = [mpi_wrapper, '-c', '-std=c++17'] + mpi_compile_flags + _hybrid_inc + ['-o', stub_o, stub_cpp]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True)
+
+        exe_name = output_exe if output_exe else 'hybrid_mpi_cuda_app'
+        qir_rt_a = _find_static_library('libqir-runner-runtime.a', build_base,
+                                        'mlir/qir_runner_runtime')
+        mpi_rt_a = _find_static_library('libqllvm-mpi-runtime.a', build_base,
+                                          'mlir/qllvm_mpi_runtime')
+        if not qir_rt_a:
+            raise FileNotFoundError('libqir-runner-runtime.a not found. Build qllvm with ninja install.')
+        if not mpi_rt_a:
+            raise FileNotFoundError('libqllvm-mpi-runtime.a not found. Build qllvm with -DQLLVM_ENABLE_MPI=ON and ninja install.')
+
+        cuda_lib_dir = os.path.join(cuda_path, 'lib64')
+        if not os.path.isdir(cuda_lib_dir):
+            cuda_lib_dir = os.path.join(cuda_path, 'lib')
+        obj_inputs = cpp_objs + cu_objs + [stub_o, mpi_rt_a, qir_rt_a]
+        # mpicxx link: CUDA .o from nvcc -c + MPI libs (more reliable than nvcc+MPI).
+        link_cmd = ([mpi_wrapper, '-o', exe_name] + obj_inputs +
+                    ['-L' + cuda_lib_dir, '-lcudart', '-lcuda', '-ldl', '-lrt', '-lpthread']
+                    + mpi_link_flags)
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        for f in [stub_cpp, stub_o] + cpp_objs + cu_objs:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid MPI (C+++CUDA+qir-runner) executable: {}. Run with: mpirun -np <N> {} -shots {}'.format(
+                exe_name, exe_name, shots))
+        return exe_name
+
+    # P4: MPI + C++ + QASM via llvm-link (in-process QIR, no qir-runner subprocess)
+    def compile_hybrid_mpi_llvm(cpp_files, qasm_files, output_exe=None, mpi_wrapper=None):
+        """Compile MPI C++ + QASM through LLVM IR merge + qir-qrt-stub."""
+        _shutil = __import__('shutil')
+        mpi_wrapper, mpi_compile_flags, mpi_link_flags = _resolve_mpi_compiler(mpi_wrapper)
+        llvm_bin_path = str(pathlib.Path(compiler).parent)
+        qllvm_tool, build_base = _resolve_qllvm_compile_tool()
+        run_env = _qllvm_compile_run_env(build_base)
+        work_dir = os.getcwd()
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+
+        def compile_qasm_ll(qasm_file):
+            base = os.path.splitext(os.path.basename(qasm_file))[0]
+            ll_path = os.path.join(work_dir, base + '_qir.ll')
+            text = _preprocess_qasm_file(qasm_file, mpi_wrapper)
             tmp_qasm = '__tmp_hybrid_' + base + '.qasm'
             with open(tmp_qasm, 'w') as f:
                 f.write(text)
-            cmd = [qllvm_tool, tmp_qasm, '-qrt', 'nisq', '-qpu', 'qir-runner', opt_level,
-                   '-emit-backend=qir-runner', '-output-path=' + bc_path]
+            qrt_val = 'nisq'
+            if '-qrt' in sys.argv[1:]:
+                qrt_val = sys.argv[sys.argv.index('-qrt') + 1]
+            cmd = [qllvm_tool, tmp_qasm, '-no-entrypoint', '-internal-func-name', base,
+                   '-output-ll', ll_path, opt_level, '-qrt', qrt_val]
             if '-basicgate' in str(sys.argv):
                 for a in sys.argv[1:]:
                     if '-basicgate' in a:
@@ -658,9 +1020,149 @@ def main(argv=None):
                 info(' '.join(cmd))
             subprocess.run(cmd, check=True, env=run_env)
             os.remove(tmp_qasm)
-            bc_files.append((base, bc_path))
+            return ll_path
 
-        # 4. Generate kernel stubs
+        ll_files = _compile_qasm_files_parallel(qasm_files, compile_qasm_ll)
+
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            ll_path = os.path.join(work_dir, base + '_classical.ll')
+            cmd = [compiler, '-S', '-emit-llvm', '-std=c++17'] + mpi_compile_flags + ['-o', ll_path, cpp_file]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            ll_files.append(ll_path)
+
+        bc_files = []
+        for ll_path in ll_files:
+            bc_path = ll_path.replace('.ll', '.bc')
+            as_cmd = [llvm_bin_path + '/llvm-as', ll_path, '-o', bc_path]
+            if verbose:
+                info(' '.join(as_cmd))
+            subprocess.run(as_cmd, check=True)
+            bc_files.append(bc_path)
+
+        merged_bc = os.path.join(work_dir, '__hybrid_mpi_merged.bc')
+        link_bc_cmd = [llvm_bin_path + '/llvm-link', '-o', merged_bc] + bc_files
+        if verbose:
+            info(' '.join(link_bc_cmd))
+        subprocess.run(link_bc_cmd, check=True)
+
+        merged_o = os.path.join(work_dir, '__hybrid_mpi_merged.o')
+        llc_cmd = [llvm_bin_path + '/llc', '-filetype=obj', merged_bc, '-o', merged_o]
+        if verbose:
+            info(' '.join(llc_cmd))
+        subprocess.run(llc_cmd, check=True)
+
+        exe_name = output_exe if output_exe else 'hybrid_mpi_llvm_app'
+        lib_dir = '@CMAKE_INSTALL_PREFIX@/lib'
+        if build_base:
+            stub_path = os.path.join(build_base, 'mlir', 'qir_qrt_stub')
+            if os.path.exists(os.path.join(stub_path, 'libqir-qrt-stub.so')):
+                lib_dir = stub_path
+        stub_so = os.path.join(lib_dir, 'libqir-qrt-stub.so')
+        if not os.path.exists(stub_so):
+            stub_so = os.path.join(os.path.expanduser('~'), '.qllvm', 'lib', 'libqir-qrt-stub.so')
+        if not os.path.exists(stub_so):
+            raise FileNotFoundError('libqir-qrt-stub.so not found. Run cmake install.')
+        hybrid_libs = ['-rdynamic', '-Wl,-rpath,' + lib_dir + ':@LLVM_INSTALL_PREFIX@/lib',
+                       '-L', lib_dir, '-lqir-qrt-stub', '-lpthread']
+        link_cmd = [mpi_wrapper, '-no-pie', merged_o, '-o', exe_name] + hybrid_libs + mpi_link_flags
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        for f in ll_files + bc_files:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        for f in [merged_bc, merged_o]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid MPI (llvm-link) executable: {}. Run with: mpirun -np <N> {}'.format(exe_name, exe_name))
+        return exe_name
+
+    # P3: MPI + hardware path (compile-time qasm-backend + mock MPIQ runtime)
+    def compile_hybrid_mpi_hardware(cpp_files, qasm_files, output_exe=None, mpi_wrapper=None, mpiq_config_path=None):
+        """Compile MPI C++ + QASM for hardware dispatch (mock MPIQ when no QPU)."""
+        _shutil = __import__('shutil')
+        mpi_wrapper, mpi_compile_flags, mpi_link_flags = _resolve_mpi_compiler(mpi_wrapper)
+        qllvm_tool, build_base = _resolve_qllvm_compile_tool()
+        run_env = _qllvm_compile_run_env(build_base)
+        work_dir = os.getcwd()
+        _hybrid_inc = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm',
+                       '-I', '@QLLVM_MPI_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+
+        compiled_qasm_files = _compile_qasm_files_parallel(
+            qasm_files,
+            lambda qf: _compile_qasm_to_hardware_qasm(qf, qllvm_tool, mpi_wrapper, work_dir, run_env, opt_level))
+
+        stub_cpp = os.path.join(work_dir, '__mpiq_hardware_kernels.cpp')
+        _generate_mpi_hardware_stub(stub_cpp, compiled_qasm_files, mpiq_config_path)
+        stub_o = os.path.join(work_dir, '__mpiq_hardware_kernels.o')
+
+        cpp_objs = []
+        for cpp_file in cpp_files:
+            base = os.path.splitext(os.path.basename(cpp_file))[0]
+            o_path = os.path.join(work_dir, base + '_classical.o')
+            cmd = [mpi_wrapper, '-c', '-std=c++17'] + mpi_compile_flags + _hybrid_inc + ['-o', o_path, cpp_file]
+            if verbose:
+                info(' '.join(cmd))
+            subprocess.run(cmd, check=True)
+            cpp_objs.append(o_path)
+
+        cmd = [mpi_wrapper, '-c', '-std=c++17'] + mpi_compile_flags + _hybrid_inc + ['-o', stub_o, stub_cpp]
+        if verbose:
+            info(' '.join(cmd))
+        subprocess.run(cmd, check=True)
+
+        exe_name = output_exe if output_exe else 'hybrid_mpi_hardware_app'
+        mpiq_rt_a = _find_static_library('libqllvm-mpiq-runtime.a', build_base, 'mlir/qllvm_mpi_runtime')
+        if not mpiq_rt_a:
+            raise FileNotFoundError('libqllvm-mpiq-runtime.a not found. Build qllvm with -DQLLVM_ENABLE_MPI=ON and ninja install.')
+
+        link_cmd = ([mpi_wrapper, '-o', exe_name] + cpp_objs + [stub_o, mpiq_rt_a] + mpi_link_flags)
+        if verbose:
+            info(' '.join(link_cmd))
+        subprocess.run(link_cmd, check=True)
+
+        for f in [stub_cpp, stub_o] + cpp_objs:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if verbose:
+            info('Hybrid MPI (hardware/mock MPIQ) executable: {}. Artifacts: *_compiled.qasm'.format(exe_name))
+        return exe_name
+
+    # Phase 1: C++ + CUDA + QASM hybrid compilation (qir-runner for quantum)
+    def compile_hybrid_cuda_quantum(cpp_files, cu_files, qasm_files, output_exe=None):
+        """Compile C++ + CUDA + QASM to exe: CUDA kernels + qir-runner for quantum."""
+        _shutil = __import__('shutil')
+        cxx_compiler = _shutil.which('g++') or _shutil.which('gcc') or compiler
+        qllvm_tool, build_base = _resolve_qllvm_compile_tool()
+        run_env = _qllvm_compile_run_env(build_base)
+        work_dir = os.getcwd()
+        _qir_rt_inc_cuda = ['-I', '@CMAKE_INSTALL_PREFIX@/include/qllvm', '-I', '@QLLVM_QIR_RUNTIME_INCLUDE@']
+        opt_level = '-O1' if '-O1' in sys.argv[1:] else '-O0'
+        cuda_arch, cuda_path, nvcc_path = _parse_cuda_options(_shutil)
+
+        cu_objs, cpp_objs, bc_files = _run_compile_stages_parallel([
+            lambda: _compile_hybrid_cu_objects(
+                cu_files, work_dir, cuda_arch, nvcc_path, compiler, cuda_path),
+            lambda: _compile_hybrid_cpp_objects(
+                cpp_files, work_dir, cxx_compiler, _qir_rt_inc_cuda),
+            lambda: _compile_qasm_files_parallel(
+                qasm_files,
+                lambda qf: _compile_qasm_to_bc(qf, qllvm_tool, cxx_compiler, work_dir, run_env, opt_level)),
+        ])
+
+        # Generate kernel stubs
         stub_cpp = os.path.join(work_dir, '__qir_runner_kernels.cpp')
         with open(stub_cpp, 'w') as f:
             f.write('/* Auto-generated kernel stubs for CUDA + qir-runner hybrid */\n')
@@ -1238,14 +1740,35 @@ def main(argv=None):
     qasm_files = [arg for arg in sys.argv[1:] if os.path.isfile(arg) and os.path.splitext(arg)[1] == '.qasm']
 
     if (cpp_files or cu_files) and qasm_files:
-        output_exe = 'hybrid_app'
+        output_exe = 'hybrid_mpi_app' if use_mpi else 'hybrid_app'
         if '-o' in sys.argv[1:]:
             idx = sys.argv.index('-o')
             output_exe = sys.argv[idx + 1]
             sys.argv.remove(output_exe)
             sys.argv.remove('-o')
         try:
-            if cu_files:
+            if use_mpi:
+                if cu_files and mpi_mode != 'sim':
+                    print(bcolors.FAIL + '[qllvm] -mpi-mode ' + mpi_mode + ' does not support CUDA (.cu). Use -mpi-mode sim.' + bcolors.ENDC, file=sys.stderr)
+                    exit(1)
+                if mpi_mode == 'hardware':
+                    if accName not in ('qasm-backend', 'trappedion-qasm'):
+                        print(bcolors.FAIL + '[qllvm] MPI hardware mode requires -qpu qasm-backend.' + bcolors.ENDC, file=sys.stderr)
+                        exit(1)
+                    compile_hybrid_mpi_hardware(cpp_files, qasm_files, output_exe, mpi_wrapper, mpiq_config)
+                elif mpi_mode == 'llvm':
+                    compile_hybrid_mpi_llvm(cpp_files, qasm_files, output_exe, mpi_wrapper)
+                elif cu_files:
+                    if accName not in ('qir-runner', 'qpp'):
+                        print(bcolors.FAIL + '[qllvm] MPI sim mode requires -qpu qir-runner (or default qpp).' + bcolors.ENDC, file=sys.stderr)
+                        exit(1)
+                    compile_hybrid_mpi_cuda(cpp_files, cu_files, qasm_files, output_exe, mpi_wrapper)
+                else:
+                    if accName not in ('qir-runner', 'qpp'):
+                        print(bcolors.FAIL + '[qllvm] MPI sim mode requires -qpu qir-runner (or default qpp).' + bcolors.ENDC, file=sys.stderr)
+                        exit(1)
+                    compile_hybrid_mpi(cpp_files, qasm_files, output_exe, mpi_wrapper)
+            elif cu_files:
                 compile_hybrid_cuda_quantum(cpp_files, cu_files, qasm_files, output_exe)
             # Default hybrid (C++ + QASM): qir-runner subprocess, or LLVM link with qir-qrt-stub (see compile_hybrid).
             elif accName in ('qir-runner', 'qpp'):

@@ -1,0 +1,8 @@
+{
+  "mode": "mock",
+  "kernel": "bell",
+  "qasm": "/home/zhuyu/QLLVM/examples/hybrid_mpi_hardware/bell_compiled.qasm",
+  "config": "mock_config.json",
+  "qasm_lines": 10,
+  "status": "dispatched"
+}

@@ -8,6 +8,7 @@ set(CLANG_EXECUTABLE "${LLVM_INSTALL_PREFIX}/bin/clang++")
 
 # qir-runner-runtime.h: hybrid compile -I paths in qllvm driver
 set(QLLVM_QIR_RUNTIME_INCLUDE "${CMAKE_SOURCE_DIR}/mlir/qir_runner_runtime")
+set(QLLVM_MPI_RUNTIME_INCLUDE "${CMAKE_SOURCE_DIR}/mlir/qllvm_mpi_runtime")
 
 configure_file(qllvm.in
                ${CMAKE_BINARY_DIR}/qllvm

@@ -179,4 +179,14 @@ int qir_runner_last_histogram_get(int index, char* bitstring_out, size_t bitstri
   return 0;
 }
 
+void qir_runner_load_histogram(int n, const char* const* bitstrings, const int* counts) {
+  g_last_histogram.clear();
+  if (n <= 0 || !bitstrings || !counts) return;
+  g_last_histogram.reserve(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    if (!bitstrings[i]) continue;
+    g_last_histogram.emplace_back(std::string(bitstrings[i]), counts[i]);
+  }
+}
+
 }  // extern "C"
