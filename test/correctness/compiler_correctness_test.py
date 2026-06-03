@@ -18,11 +18,12 @@ import tempfile
 from pathlib import Path
 
 
-# Ensure test dir is in path
+# test/correctness/ harness; shared assets live under test/
 _SCRIPT_DIR = Path(__file__).resolve().parent
-os.chdir(_SCRIPT_DIR)
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+_TEST_ROOT = _SCRIPT_DIR.parent
+os.chdir(_TEST_ROOT)
+if str(_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TEST_ROOT))
 
 # Add qllvm to PATH
 _qllvm_bin = os.path.expanduser(os.environ.get("XACC_DIR", "~/.xacc")) + "/bin"
@@ -57,7 +58,7 @@ DEFAULT_TOPOLOGIES = ["none", "linear10", "linear30", "grid12x12", "eagle127","t
 FIDELITY_THRESHOLD = 0.999
 
 # --- Config directory ---
-CONFIG_DIR = _SCRIPT_DIR / "qpu_configs"
+CONFIG_DIR = _TEST_ROOT / "qpu_configs"
 
 
 def extract_qubit_count(filepath):
@@ -172,11 +173,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python compiler_correctness_test.py
-  python compiler_correctness_test.py --scale medium --opt O0
-  python compiler_correctness_test.py --basicgate cz cx tyxonq
-  python compiler_correctness_test.py --qpu-config linear10 linear30
-  python compiler_correctness_test.py --sabre-cpp --initial-mapping "[0,1,2,3,4,5,6,7,8,9]"
+  python test/correctness/compiler_correctness_test.py
+  python test/correctness/compiler_correctness_test.py --scale medium --opt O0
+  python test/correctness/compiler_correctness_test.py --basicgate cz cx tyxonq
+  python test/correctness/compiler_correctness_test.py --qpu-config linear10 linear30
+  python test/correctness/compiler_correctness_test.py --sabre-cpp --initial-mapping "[0,1,2,3,4,5,6,7,8,9]"
         """,
     )
     parser.add_argument(
@@ -226,7 +227,7 @@ Examples:
     )
     parser.add_argument(
         "--mqtbench",
-        default=str(_SCRIPT_DIR / "MQTBench"),
+        default=str(_TEST_ROOT / "MQTBench"),
         help="MQTBench directory path",
     )
     parser.add_argument(
