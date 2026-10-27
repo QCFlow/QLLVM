@@ -1,0 +1,106 @@
+{
+  "checked_at": "2026-10-27",
+  "packages": {
+    "qiskit": {
+      "version": "2.6.1",
+      "requires_python": ">=3.10",
+      "metadata_url": "https://pypi.org/pypi/qiskit/json",
+      "uploaded_at": "2026-10-22T21:47:19.839955Z",
+      "files": [
+        "qiskit-2.6.1-cp310-abi3-macosx_10_12_x86_64.whl",
+        "qiskit-2.6.1-cp310-abi3-macosx_11_0_arm64.whl",
+        "qiskit-2.6.1-cp310-abi3-manylinux_2_28_aarch64.whl",
+        "qiskit-2.6.1-cp310-abi3-manylinux_2_28_ppc64le.whl",
+        "qiskit-2.6.1-cp310-abi3-manylinux_2_28_s390x.whl",
+        "qiskit-2.6.1-cp310-abi3-manylinux_2_28_x86_64.whl",
+        "qiskit-2.6.1-cp310-abi3-win_amd64.whl",
+        "qiskit-2.6.1.tar.gz"
+      ]
+    },
+    "pytket": {
+      "version": "2.18.5",
+      "requires_python": ">=3.10",
+      "metadata_url": "https://pypi.org/pypi/pytket/json",
+      "uploaded_at": "2026-10-08T10:09:32.631888Z",
+      "files": [
+        "pytket-2.18.5-cp310-cp310-macosx_14_0_arm64.whl",
+        "pytket-2.18.5-cp310-cp310-macosx_15_0_x86_64.whl",
+        "pytket-2.18.5-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl",
+        "pytket-2.18.5-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "pytket-2.18.5-cp310-cp310-win_amd64.whl",
+        "pytket-2.18.5-cp311-cp311-macosx_14_0_arm64.whl",
+        "pytket-2.18.5-cp311-cp311-macosx_15_0_x86_64.whl",
+        "pytket-2.18.5-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl",
+        "pytket-2.18.5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "pytket-2.18.5-cp311-cp311-win_amd64.whl",
+        "pytket-2.18.5-cp312-abi3-macosx_14_0_arm64.whl",
+        "pytket-2.18.5-cp312-abi3-macosx_15_0_x86_64.whl",
+        "pytket-2.18.5-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl",
+        "pytket-2.18.5-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "pytket-2.18.5-cp312-abi3-win_amd64.whl"
+      ]
+    },
+    "pyqpanda": {
+      "version": "3.8.5",
+      "requires_python": null,
+      "metadata_url": "https://pypi.org/pypi/pyqpanda/json",
+      "uploaded_at": "2025-05-13T06:02:37.830917Z",
+      "files": [
+        "pyqpanda-3.8.5-cp310-cp310-macosx_13_0_arm64.whl",
+        "pyqpanda-3.8.5-cp310-none-manylinux1_x86_64.whl",
+        "pyqpanda-3.8.5-cp310-none-win_amd64.whl",
+        "pyqpanda-3.8.5-cp311-cp311-macosx_13_0_arm64.whl",
+        "pyqpanda-3.8.5-cp311-none-manylinux1_x86_64.whl",
+        "pyqpanda-3.8.5-cp311-none-win_amd64.whl",
+        "pyqpanda-3.8.5-cp38-cp38-macosx_13_0_arm64.whl",
+        "pyqpanda-3.8.5-cp38-none-manylinux1_x86_64.whl",
+        "pyqpanda-3.8.5-cp38-none-win_amd64.whl",
+        "pyqpanda-3.8.5-cp39-cp39-macosx_13_0_arm64.whl",
+        "pyqpanda-3.8.5-cp39-none-manylinux1_x86_64.whl",
+        "pyqpanda-3.8.5-cp39-none-win_amd64.whl"
+      ]
+    },
+    "pennylane": {
+      "version": "0.45.1",
+      "requires_python": ">=3.11",
+      "metadata_url": "https://pypi.org/pypi/pennylane/json",
+      "uploaded_at": "2026-06-26T21:40:32.556105Z",
+      "files": [
+        "pennylane-0.45.1-py3-none-any.whl"
+      ]
+    },
+    "mqt.bench": {
+      "version": "2.3.0",
+      "requires_python": ">=3.11",
+      "metadata_url": "https://pypi.org/pypi/mqt.bench/json",
+      "uploaded_at": "2026-09-12T07:40:43.924838Z",
+      "files": [
+        "mqt_bench-2.3.0-py3-none-any.whl",
+        "mqt_bench-2.3.0.tar.gz"
+      ]
+    },
+    "pyqpanda3": {
+      "version": "0.5.1",
+      "requires_python": null,
+      "metadata_url": "https://pypi.org/pypi/pyqpanda3/json",
+      "uploaded_at": "2026-10-26T09:49:53.485566Z",
+      "files": [
+        "pyqpanda3-0.5.1-cp310-cp310-macosx_13_0_arm64.whl",
+        "pyqpanda3-0.5.1-cp310-none-manylinux1_x86_64.whl",
+        "pyqpanda3-0.5.1-cp310-none-win_amd64.whl",
+        "pyqpanda3-0.5.1-cp311-cp311-macosx_13_0_arm64.whl",
+        "pyqpanda3-0.5.1-cp311-none-manylinux1_x86_64.whl",
+        "pyqpanda3-0.5.1-cp311-none-win_amd64.whl",
+        "pyqpanda3-0.5.1-cp312-cp312-macosx_13_0_arm64.whl",
+        "pyqpanda3-0.5.1-cp312-none-manylinux1_x86_64.whl",
+        "pyqpanda3-0.5.1-cp312-none-win_amd64.whl",
+        "pyqpanda3-0.5.1-cp313-cp313-macosx_13_0_arm64.whl",
+        "pyqpanda3-0.5.1-cp313-none-manylinux1_x86_64.whl",
+        "pyqpanda3-0.5.1-cp313-none-win_amd64.whl",
+        "pyqpanda3-0.5.1-cp314-cp314-macosx_13_0_arm64.whl",
+        "pyqpanda3-0.5.1-cp314-none-manylinux1_x86_64.whl",
+        "pyqpanda3-0.5.1-cp314-none-win_amd64.whl"
+      ]
+    }
+  }
+}

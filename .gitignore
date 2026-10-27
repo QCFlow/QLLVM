@@ -29,3 +29,13 @@ hybrid_bell
 /examples/hybrid_mpi_policy/mpi_policy*
 /examples/hybrid_mpi_rankmap/mpi_rankmap
 /examples/hybrid_mpi_vqe/mpi_vqe_app
+
+# Legacy benchmark working copies are local history, not optional-suite sources.
+/benchmark/public_circuits/
+/test/public_benchmarks/
+/test/official_suites/__pycache__/
+/test/official_suites/.pytest_cache/
+
+# Optional benchmark environments
+/.venv-bench/
+/.venv-bench-metrics/

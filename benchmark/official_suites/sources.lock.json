@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "mqtbench": {
+      "repository": "https://github.com/munich-quantum-toolkit/bench",
+      "reference": "v2.3.0",
+      "revision": "2cd3f3b08d5d8866595948fbce955e701e86a5df",
+      "archive_url": "https://codeload.github.com/munich-quantum-toolkit/bench/tar.gz/2cd3f3b08d5d8866595948fbce955e701e86a5df",
+      "archive_sha256": "593573266ab3d1e2ad26fd4a92db8f5899d55ce7ab49a19bd355acccf13b6460",
+      "file_count": 124,
+      "bytes": 1709469
+    },
+    "qasmbench": {
+      "repository": "https://github.com/pnnl/QASMBench",
+      "reference": "master",
+      "revision": "357b942396d5c2b7cbc1c229c585a6ef5ccaebac",
+      "archive_url": "https://codeload.github.com/pnnl/QASMBench/tar.gz/357b942396d5c2b7cbc1c229c585a6ef5ccaebac",
+      "archive_sha256": "2f9dd728496daac52044ba58532daf12e15d48f5f49a390530cebc8782d00208",
+      "file_count": 523,
+      "bytes": 658322417
+    },
+    "benchpress": {
+      "repository": "https://github.com/Qiskit/benchpress",
+      "reference": "main",
+      "revision": "b695f30e83a32bac05b9b4d8e98d37ba9aae5236",
+      "archive_url": "https://codeload.github.com/Qiskit/benchpress/tar.gz/b695f30e83a32bac05b9b4d8e98d37ba9aae5236",
+      "archive_sha256": "28d37b4230976a97464c90599549598b093a50c7a776a73c2ae2ee5e8e4a0ec8",
+      "file_count": 1069,
+      "bytes": 353780043
+    }
+  }
+}

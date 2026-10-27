@@ -1,0 +1,27 @@
+# Optional full upstream checkouts and local integrity receipts
+/upstream/
+/*.source.json
+
+# Generated circuit inputs and catalogs
+/generated/
+/catalog.json
+/*.catalog.json
+
+# Runtime outputs and local reports
+/results/
+/reports/
+/outputs/
+/runs/
+/测试结果简报.md
+**/results.json
+**/results.csv
+**/summary.md
+**/worker.json
+**/request.json
+*.log
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+.benchmarks/
+**/.benchmarks/
