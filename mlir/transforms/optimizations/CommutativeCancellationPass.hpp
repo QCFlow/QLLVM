@@ -1,5 +1,6 @@
 /*
  * This code is part of QLLVM.
+ * Modified by QCFlow (2026): avoid copying read-only commutation lookup data.
  *
  * (C) Copyright QCFlow 2026.
  *
@@ -27,11 +28,11 @@
 using namespace mlir;
 
 namespace qllvm {
-  void deal_topop(std::vector<mlir::quantum::ValueSemanticsInstOp> topop,std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hash_Table,
+  void deal_topop(const std::vector<mlir::quantum::ValueSemanticsInstOp> &topop,const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,
                 std::vector<mlir::quantum::ValueSemanticsInstOp> &top_op,std::vector<std::pair<std::string, int64_t>> &wireset,
-              std::unordered_map<std::string, int> qbitseq);
+              const std::unordered_map<std::string, int> &qbitseq);
   bool CommutationChecker(mlir::quantum::ValueSemanticsInstOp op1,mlir::quantum::ValueSemanticsInstOp op2,
-  std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hash_Table,std::unordered_map<std::string, int> qbitseq);
+  const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,const std::unordered_map<std::string, int> &qbitseq);
   Eigen::MatrixXcd getGateMat(mlir::quantum::ValueSemanticsInstOp &op,int i);
 struct CommutativeCancellationPass
     : public PassWrapper<CommutativeCancellationPass, OperationPass<ModuleOp>> {

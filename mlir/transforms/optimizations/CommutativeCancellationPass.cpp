@@ -1,6 +1,8 @@
 
 /*
  * This code is part of QLLVM.
+ * Modified by QCFlow (2026): avoid lookup copies and group scans, add exact
+ * CX fast paths, and preserve circuit order when cancelling or merging gates.
  *
  * (C) Copyright QCFlow 2026.
  *
@@ -37,6 +39,7 @@
 #include <unordered_map>
 #include <tr1/unordered_map>
 #include <stdexcept>
+#include <algorithm>
 
 namespace qllvm {
 void CommutativeCancellationPass::getDependentDialects(
@@ -121,9 +124,15 @@ std::unordered_map<std::string, int> qbit_seq;
 std::vector<std::pair<std::string, int64_t>> wire_set;
 std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hashTable;
 
+// A two-qubit gate belongs to a commutation group on each of its wires.
+// Build this reverse index once instead of scanning all groups per candidate.
+using CommutationGroupIndex =
+    std::map<std::pair<std::string, int64_t>,
+             std::unordered_map<mlir::Operation *, int>>;
+
 
 bool CommutationChecker(mlir::quantum::ValueSemanticsInstOp op1,mlir::quantum::ValueSemanticsInstOp op2,
-  std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hash_Table,std::unordered_map<std::string, int> qbitseq){
+  const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,const std::unordered_map<std::string, int> &qbitseq){
   if(op1.name() == "mz" || op2.name() == "mz"){
     return false;
   }
@@ -140,8 +149,29 @@ bool CommutationChecker(mlir::quantum::ValueSemanticsInstOp op1,mlir::quantum::V
 
   auto number1 = op1.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
   auto number2 = op2.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-  auto temp1 = hash_Table[number1];
-  auto temp2 = hash_Table[number2];
+  const auto &temp1 = hash_Table.at(number1);
+  const auto &temp2 = hash_Table.at(number2);
+
+  // Check common gates before allocating matrices. These identities are exact;
+  // in particular RZ commutes with the control, RX with the target of CX.
+  const auto name1 = op1.name();
+  const auto name2 = op2.name();
+  const bool cx1 = name1 == "cx" || name1 == "cnot";
+  const bool cx2 = name2 == "cx" || name2 == "cnot";
+  if (cx1 && cx2 && temp1.size() == 2 && temp2.size() == 2)
+    return temp1.front() != temp2.back() && temp2.front() != temp1.back();
+  if (cx1 && temp1.size() == 2 && temp2.size() == 1) {
+    if (name2 == "rz" && temp2.front() == temp1.front()) return true;
+    if (name2 == "rx" && temp2.front() == temp1.back()) return true;
+  }
+  if (cx2 && temp2.size() == 2 && temp1.size() == 1) {
+    if (name1 == "rz" && temp1.front() == temp2.front()) return true;
+    if (name1 == "rx" && temp1.front() == temp2.back()) return true;
+  }
+
+  const auto isControlledPauli = [](llvm::StringRef name) {
+    return name == "cx" || name == "cnot" || name == "cy" || name == "cz";
+  };
 
   if(qbits_op1 == 1){
     // index_one_1 = OP::getbit_from_valueSemanticsInstOp(op1);
@@ -190,9 +220,12 @@ bool CommutationChecker(mlir::quantum::ValueSemanticsInstOp op1,mlir::quantum::V
         l_result = mat_op1 * mat_op2;//op1 * op2
         r_result = mat_op2 * mat_op1;//op2 * op1
       }else if(index_two_2.front() == index_two_1.front() && index_two_2.back() != index_two_1.back()){
-        return true;
+        // Sharing an operand is not sufficient for arbitrary two-qubit gates.
+        return isControlledPauli(name1) && isControlledPauli(name2);
       }else if(index_two_1.back() == index_two_2.back() && index_two_1.front() != index_two_2.front()){
-        return true;
+        // CX and CZ with a shared target do NOT commute. Only apply this
+        // shortcut to identical controlled Pauli axes.
+        return name1 == name2 && isControlledPauli(name1);
       }else{
         if(index_two_1.back() == index_two_2.front() && index_two_1.front() != index_two_2.back()){
           tmp_two.clear();
@@ -336,27 +369,12 @@ std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, in
   }
 }
 
-int find_controled_index(std::vector<std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>>> commutation_vect,
-mlir::quantum::ValueSemanticsInstOp key,std::vector<std::pair<std::string, int64_t>> wire_site){
-  auto wire = wire_site.back();
-  int index = 0;
-  for(int i = 0;i < wire_set.size();i++){
-    if(wire == wire_set[i]){
-      index = i;
-      break;
-    }
-  }
-  auto vec = commutation_vect[index];
-  for(int i = 0;i < vec.size();i++){
-    auto gate = vec[i].containsKey(key);
-    if(gate){
-      return i;
-    }
-  }
-
+int find_controled_index(const CommutationGroupIndex &groups,
+mlir::quantum::ValueSemanticsInstOp key,const std::vector<std::pair<std::string, int64_t>> &wire_site){
+  return groups.at(wire_site.back()).at(key.getOperation());
 }
 
-void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::vector<std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>>> &commutation_set,
+void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const CommutationGroupIndex &groups,
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cx,std::pair<std::string, int64_t> &wire){
   std::vector<std::vector<std::pair<std::string, int64_t>>> qbits_index;
   std::vector<std::pair<std::string, int64_t>> current_index;
@@ -377,7 +395,7 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::vec
     if(current_index.front() != wire || dealed[i] == 0){
       continue;
     }
-    index = find_controled_index(commutation_set,op,current_index);
+    index = find_controled_index(groups,op,current_index);
     dealed[i] = 0;
     temp_ops.emplace_back(op);
     for(int j = i+1;j < vect.size();j++){
@@ -387,7 +405,7 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::vec
       another_index = hashTable[number2];
 
       if(another_index == current_index){
-        new_index = find_controled_index(commutation_set,op_2,another_index);
+        new_index = find_controled_index(groups,op_2,another_index);
         if(new_index == index){
           temp_ops.emplace_back(op_2);
           dealed[j] = 0;
@@ -395,7 +413,9 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::vec
           break;
         }
       }else{
-        break;
+        // All entries in vect already commute on the control wire. A gate
+        // with another target must not hide a later identical cancellable CX.
+        continue;
       }
     }
 
@@ -405,7 +425,7 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::vec
   }
 }
 
-void classification(std::vector<std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>>> &commutation_set,
+void classification(const CommutationGroupIndex &groups,
 std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>> &vect,
 std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &h,std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &y,
 std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &z,std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &x,
@@ -424,6 +444,13 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
   mlir::quantum::ValueSemanticsInstOp tmp_op;
   for(auto &sub_vec: vect){
     node_wire.emplace_back(sub_vec.getKeys());
+    // BiMap iterates by operation address, not circuit order. Rewiring a run
+    // in that order can create a cycle or erase an operation still in use.
+    auto &ordered = node_wire.back();
+    std::sort(ordered.begin(), ordered.end(), [](auto lhs, auto rhs) {
+      return lhs->template getAttrOfType<mlir::IntegerAttr>("number").getInt() <
+             rhs->template getAttrOfType<mlir::IntegerAttr>("number").getInt();
+    });
   }
 
   for(int index = 0;index < node_wire.size();index++){
@@ -456,13 +483,13 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
       }
     }
     if(cx_gate.size() > 1){
-      deal_2gates(cx_gate,commutation_set,cx,wire);
+      deal_2gates(cx_gate,groups,cx,wire);
     }
     if(cy_gate.size() > 1){
-      deal_2gates(cy_gate,commutation_set,cy,wire);
+      deal_2gates(cy_gate,groups,cy,wire);
     }
     if(cz_gate.size() > 1){
-      deal_2gates(cz_gate,commutation_set,cz,wire);
+      deal_2gates(cz_gate,groups,cz,wire);
     }
     if(h_gate.size() > 1){
       h.emplace_back(h_gate);
@@ -479,9 +506,9 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
   }
 }
 
-double total_angle(std::vector<mlir::quantum::ValueSemanticsInstOp> ops){
+double total_angle(const std::vector<mlir::quantum::ValueSemanticsInstOp> &ops){
   double total_angle = 0,current_angle = 0;
-  for(auto &op : ops){
+  for(auto op : ops){
     if(op.name() == "p"||op.name() == "u1"||op.name() == "rz"||op.name() == "rx"){
       current_angle = qllvm::OP::tryGetConstAngle(op.getOperand(1));
     }else if(op.name() == "z"||op.name() == "x"){
@@ -505,8 +532,8 @@ void replace_x_z(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,std::str
 
   for(auto it = vect.begin(); it != vect.end(); ++it){
     auto current_op = *it;
-    auto next_op = *(it+1);
     if(it + 1 != vect.end()){
+      auto next_op = *(it+1);
       if(current_op.getResult(0) != next_op.getOperand(0)){
         current_op.getResult(0).replaceAllUsesWith(inputQubit);
         inputQubit = next_op.getOperand(0);
@@ -544,8 +571,8 @@ void delete_gate(std::vector<mlir::quantum::ValueSemanticsInstOp> &dead,std::str
   }
   for(auto it = dead.begin(); it != dead.end(); ++it){
     auto current_op = *it;
-    auto next_op = *(it+1);
     if(it + 1 != dead.end()){
+      auto next_op = *(it+1);
       if((q_gate_length_enev != q_gate_length) && (current_op == second)){
         break;
       }
@@ -585,13 +612,13 @@ void delete_gate(std::vector<mlir::quantum::ValueSemanticsInstOp> &dead,std::str
   }
 }
 
-void deal_topop(std::vector<mlir::quantum::ValueSemanticsInstOp> topop,std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hash_Table,
+void deal_topop(const std::vector<mlir::quantum::ValueSemanticsInstOp> &topop,const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,
                 std::vector<mlir::quantum::ValueSemanticsInstOp> &top_op,std::vector<std::pair<std::string, int64_t>> &wireset,
-              std::unordered_map<std::string, int> qbitseq){
+              const std::unordered_map<std::string, int> &qbitseq){
   std::vector<std::pair<std::string, int64_t>> idex_two;
-  for(auto &op : topop){
+  for(auto op : topop){
     int number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-    auto temp1 = hash_Table[number];
+    const auto &temp1 = hash_Table.at(number);
     if(op == topop.front()){
       top_op.emplace_back(op);
       if(op.getNumResults() == 1){
@@ -677,6 +704,8 @@ void CommutativeCancellationPass::runOnOperation() {
   // std::cout << "CommutativeCancellationPass:  " << std::endl;
   // gen_qasm(getOperation(),"before.qasm");
   // getOperation().dump();
+  qbit_seq.clear();
+  hashTable.clear();
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cx;//["cx", "cy", "cz", "h", "y"]
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cy;
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cz;
@@ -751,11 +780,18 @@ void CommutativeCancellationPass::runOnOperation() {
     i++;
   }
 
-  i = 0;
+  CommutationGroupIndex groups;
+  for (size_t w = 0; w < commutation_set.size(); ++w) {
+    auto &wireGroups = groups[wire_set[w]];
+    for (size_t g = 0; g < commutation_set[w].size(); ++g)
+      for (auto op : commutation_set[w][g].getKeys())
+        wireGroups.emplace(op.getOperation(), static_cast<int>(g));
+  }
 
+  i = 0;
   for(auto &vect:commutation_set){
     wire = wire_set[i];
-    classification(commutation_set,vect,h,y,z,x,cx,cy,cz,wire);
+    classification(groups,vect,h,y,z,x,cx,cy,cz,wire);
     i++;
   }
 
