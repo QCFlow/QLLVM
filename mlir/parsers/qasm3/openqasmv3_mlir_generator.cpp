@@ -17,6 +17,40 @@
 #include "qasm3Parser.h"
 #include "qasm3_visitor.hpp"
 
+#include "BailErrorStrategy.h"
+#include "DefaultErrorStrategy.h"
+#include "atn/ParserATNSimulator.h"
+
+#include <memory>
+
+namespace {
+
+// SLL resolves the common statement forms. Context-sensitive input throws
+// ParseCancellationException and is parsed again with full LL.
+qasm3::qasm3Parser::ProgramContext *
+parseQasmProgram(qasm3::qasm3Parser &parser, antlr4::CommonTokenStream &tokens,
+                 antlr4::ANTLRErrorListener *listener) {
+  parser.removeErrorListeners();
+  parser.setErrorHandler(std::make_shared<antlr4::BailErrorStrategy>());
+  parser.getInterpreter<antlr4::atn::ParserATNSimulator>()->setPredictionMode(
+      antlr4::atn::PredictionMode::SLL);
+  try {
+    return parser.program();
+  } catch (const antlr4::ParseCancellationException &) {
+    tokens.reset();
+    parser.reset();
+    parser.removeErrorListeners();
+    if (listener)
+      parser.addErrorListener(listener);
+    parser.setErrorHandler(std::make_shared<antlr4::DefaultErrorStrategy>());
+    parser.getInterpreter<antlr4::atn::ParserATNSimulator>()->setPredictionMode(
+        antlr4::atn::PredictionMode::LL);
+    return parser.program();
+  }
+}
+
+}  // namespace
+
 namespace qllvm {
 
 void OpenQasmV3MLIRGenerator::initialize_mlirgen(
@@ -260,14 +294,13 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
     }
   };
 
-  // Setup our custom error listeners
+  // Setup our custom error listeners. The fast parse installs this listener
+  // only if it falls back to full LL.
   lexer.removeErrorListeners();
   parser.removeErrorListeners();
   Qasm3ParserErrorListener el(file_name);
-  parser.addErrorListener(&el);
 
-  // Get the parse tree and visit
-  tree::ParseTree *tree = parser.program();
+  tree::ParseTree *tree = parseQasmProgram(parser, tokens, &el);
   visitor->visitChildren(tree);
   return;
 }
