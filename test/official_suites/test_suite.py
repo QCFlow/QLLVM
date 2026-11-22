@@ -9,6 +9,7 @@ import io
 import tarfile
 import shutil
 import unittest
+import os
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2] / "benchmark/official_suites"
@@ -24,6 +25,20 @@ report_spec.loader.exec_module(reporter)
 
 
 class IntegrityTests(unittest.TestCase):
+    def test_bounded_worker_enforces_native_and_sdk_thread_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            script = folder / 'probe.py'
+            script.write_text('import os,json\nfrom pathlib import Path\n'
+                'Path("worker.json").write_text(json.dumps(dict(status="ok", '
+                'rayon=os.getenv("RAYON_NUM_THREADS"), parallel=os.getenv("QISKIT_PARALLEL"), '
+                'processes=os.getenv("QISKIT_NUM_PROCS"), blas=os.getenv("OPENBLAS_NUM_THREADS"))))\n')
+            with patch.dict(os.environ, RAYON_NUM_THREADS='80', QISKIT_PARALLEL='TRUE',
+                            QISKIT_NUM_PROCS='40', OPENBLAS_NUM_THREADS='32'):
+                result = runner.bounded([sys.executable, str(script)], folder, 10, 0)
+            self.assertEqual(result, dict(status='ok', rayon='1', parallel='FALSE',
+                                          processes='1', blas='1'))
+
     def fixture_download(self, folder):
         archive = folder / "fixture.tar.gz"
         with tarfile.open(archive, "w:gz") as handle:
@@ -137,6 +152,19 @@ class ReportingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             result = runner.bounded([sys.executable, "-c", "import time; time.sleep(10)"], Path(folder), 0.1, 0)
             self.assertEqual(result["status"], "timeout")
+
+    def test_completed_compile_does_not_promote_metrics_timeout_to_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            script = ("import json,time; "
+                      "open('compile-checkpoint.json','w').write(json.dumps("
+                      "{'status':'compiled','pipeline_seconds':0.01,'output_bytes':50})); "
+                      "time.sleep(10)")
+            result = runner.bounded([sys.executable, "-c", script], folder, 0.3, 0)
+            self.assertEqual(result["status"], "timeout")
+            self.assertEqual(result["compile_checkpoint"]["status"], "compiled")
+            self.assertEqual(result["compile_checkpoint"]["pipeline_seconds"], 0.01)
+            self.assertNotIn("pipeline_seconds", result)
 
     def test_retest_merge_requires_explicit_replacement_and_matching_config(self):
         with tempfile.TemporaryDirectory() as folder:

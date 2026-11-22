@@ -29,7 +29,9 @@ def bounded(command, directory, timeout, memory_gb=8, preload=None):
         if memory_gb:
             resource.setrlimit(resource.RLIMIT_AS, (int(memory_gb * 1024**3),) * 2)
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
-               NUMEXPR_NUM_THREADS="1", PYTHONDONTWRITEBYTECODE="1")
+               NUMEXPR_NUM_THREADS="1", RAYON_NUM_THREADS="1",
+               QISKIT_PARALLEL="FALSE", QISKIT_NUM_PROCS="1",
+               PYTHONDONTWRITEBYTECODE="1")
     if preload:
         env["LD_PRELOAD"] = str(preload)
     with (directory / "process.log").open("w") as log:
@@ -41,7 +43,14 @@ def bounded(command, directory, timeout, memory_gb=8, preload=None):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-            return {"status": "timeout", "error": f"Worker exceeded {timeout}s", "wall_seconds": time.perf_counter() - start}
+            result = {"status": "timeout", "error": f"Worker exceeded {timeout}s", "wall_seconds": time.perf_counter() - start}
+            checkpoint = directory / "compile-checkpoint.json"
+            if checkpoint.is_file():
+                try:
+                    result["compile_checkpoint"] = json.loads(checkpoint.read_text())
+                except (OSError, ValueError) as exc:
+                    result["checkpoint_error"] = str(exc)
+            return result
     if process.returncode:
         return {"status": "failed", "error": f"Worker process exit {process.returncode}; see process.log"}
     result = directory / "worker.json"
