@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QLLVM 编译性能测试报告</title>
+<style>
+  :root {
+    --bg: #f4f7fd;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --faint: #94a3b8;
+    --line: #e5ebf5;
+    --card: #ffffff;
+    --blue: #3d6bff;
+    --blue-ink: #2446c8;
+    --sky: #3d94e0;
+    --violet: #7c6cf0;
+    --violet-ink: #5346b0;
+    --soft: #f8faff;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Segoe UI", sans-serif;
+    background:
+      radial-gradient(980px 420px at 100% -8%, rgba(124, 108, 240, 0.10), transparent 62%),
+      radial-gradient(860px 380px at -8% -12%, rgba(61, 107, 255, 0.12), transparent 58%),
+      var(--bg);
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 28px 72px; }
+  h1 {
+    margin: 0 0 10px;
+    font-size: 44px;
+    line-height: 1.2;
+    font-weight: 650;
+    letter-spacing: -0.03em;
+  }
+  .when { margin: 0 0 28px; color: var(--muted); font-size: 14px; }
+  .tabs {
+    display: flex; flex-wrap: wrap; gap: 0 4px;
+    border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    appearance: none; background: none; border: 0;
+    margin: 0 0 -1px; padding: 10px 14px 12px;
+    font: inherit; font-size: 14.5px; color: var(--muted);
+    border-bottom: 2px solid transparent; cursor: pointer;
+  }
+  .tab:hover { color: var(--violet-ink); }
+  .tab[aria-selected="true"] { color: var(--blue-ink); font-weight: 650; border-bottom-color: var(--blue); }
+  .tab[aria-selected="true"][data-kind="peer"] { color: var(--violet-ink); border-bottom-color: var(--violet); }
+  .tab:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 6px; }
+  .panel { padding-top: 26px; }
+  .panel[hidden] { display: none; }
+  .chart {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 18px 18px 14px;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+    margin: 0 0 12px; color: var(--muted); font-size: 15px;
+  }
+  .legend-note { flex-basis: 100%; }
+  .legend i {
+    display: inline-block; width: 10px; height: 10px; border-radius: 99px;
+    margin-right: 6px; vertical-align: 1px;
+  }
+  .i-gate { background: var(--blue); }
+  .i-depth { background: var(--sky); }
+  .i-two { background: var(--violet); }
+  .chart-head, .chart-row {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr) 84px 90px 78px 96px;
+    column-gap: 10px;
+    align-items: center;
+  }
+  .r-nums { display: contents; }
+  .r-nums .num::before { content: none; }
+  .chart-head {
+    color: var(--faint); font-size: 15px; font-weight: 650; padding: 0 0 6px;
+  }
+  .chart-head span:nth-child(n+3) { text-align: right; line-height: 1.25; }
+  .unit { display: block; font-size: 13px; font-weight: 500; color: var(--faint); }
+  .h-gate { color: var(--blue-ink); }
+  .h-two { color: var(--violet-ink); }
+  .h-depth { color: #2174b8; }
+  .h-time { color: var(--violet-ink); }
+  .chart-row { min-height: 58px; border-top: 1px solid #f0f3f9; }
+  .r-name { font-size: 14px; font-weight: 600; color: var(--violet-ink); }
+  .r-track { position: relative; height: 40px; }
+  .zero {
+    position: absolute; left: 50%; top: 2px; bottom: 2px; width: 1px; background: #d5dced;
+  }
+  .bar {
+    position: absolute; height: 7px; border-radius: 99px; min-width: 2px;
+  }
+  .bar.gate { background: var(--blue); top: 5px; }
+  .bar.depth { background: var(--sky); top: 16px; }
+  .bar.two { background: var(--violet); top: 27px; }
+  .bar-lab {
+    position: absolute; font-size: 12px; font-weight: 650; line-height: 8px;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .bar-lab.gate { top: 4px; color: var(--blue-ink); }
+  .bar-lab.depth { top: 15px; color: #2174b8; }
+  .bar-lab.two { top: 26px; color: var(--violet-ink); }
+  .bar-lab.pos { margin-left: 4px; }
+  .bar-lab.neg { transform: translateX(calc(-100% - 4px)); }
+  .na {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--faint); font-size: 12.5px;
+  }
+  .num, .num small {
+    display: block; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .num { font-size: 16px; font-weight: 650; line-height: 1.2; }
+  .num small { font-size: 12px; font-weight: 450; color: var(--faint); margin-top: 2px; }
+  .c-gate { color: var(--blue-ink); }
+  .c-depth { color: #2174b8; }
+  .c-two, .c-time { color: var(--violet-ink); }
+  .axis-note {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr) 378px;
+    column-gap: 10px;
+    margin: 6px 0 0;
+    color: var(--faint); font-size: 11.5px;
+  }
+  .axis-note span:first-child { grid-column: 2; justify-self: start; }
+  .axis-note span:last-child { grid-column: 2; justify-self: end; }
+  .note {
+    margin: 12px 2px 0;
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .note b { color: var(--ink); font-weight: 650; margin-right: 6px; }
+  .read {
+    margin: 14px 2px 0; color: var(--muted); font-size: 13px;
+  }
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 18px 20px;
+    margin: 0 0 8px;
+  }
+  .metrics-time { grid-template-columns: minmax(0, 240px); }
+  .metric .num {
+    font-size: 36px; font-weight: 640; letter-spacing: -0.03em; line-height: 1;
+    text-align: left;
+  }
+  .peer-title {
+    margin: 0 0 16px;
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  .metric .cap { margin-top: 8px; font-size: 14px; color: var(--ink); }
+  .metric .n { margin-top: 2px; font-size: 12px; color: var(--faint); }
+  .tone-blue { color: var(--blue-ink); }
+  .tone-violet { color: var(--violet-ink); }
+  .tone-muted { color: var(--faint); }
+  .lead { margin: 18px 0 22px; max-width: 42em; font-size: 15.5px; }
+  .reason { margin: -8px 0 22px; max-width: 44em; color: var(--muted); font-size: 13.5px; }
+  .cases { margin: 0; padding: 0; list-style: none; max-width: 640px; }
+  .cases li {
+    display: flex; justify-content: space-between; gap: 16px;
+    padding: 9px 0; border-top: 1px solid var(--line); font-size: 13.5px;
+  }
+  .cases .who { color: var(--muted); }
+  .cases b { font-weight: 600; }
+  .block-label {
+    margin: 22px 0 8px; font-size: 12.5px; letter-spacing: 0.04em;
+    color: var(--faint); font-weight: 600;
+  }
+  .times {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px; margin-top: 22px;
+  }
+  .times article { padding: 2px 0; }
+  .times .sec {
+    font-size: 22px; font-weight: 640; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; color: var(--violet-ink);
+  }
+  .times .lab { font-size: 13px; margin-top: 2px; }
+  .times .sub { font-size: 12px; color: var(--faint); }
+  .close { margin-top: 32px; max-width: 46em; }
+  .close h2 {
+    margin: 0 0 10px;
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  .close p { margin: 0 0 8px; font-size: 13.5px; }
+  .close b { font-weight: 650; }
+  .detail { margin-top: 28px; }
+  .detail h2 {
+    margin: 0 0 12px;
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  .detail[hidden] { display: none; }
+  .detail figure { margin: 0; }
+  .detail svg {
+    display: block; width: 100%; height: auto;
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  }
+  .detail figcaption { margin-top: 6px; color: var(--muted); font-size: 12.5px; }
+  .detail .quiet { margin: 0; color: var(--muted); font-size: 13.5px; }
+  details {
+    margin-top: 28px; border-top: 1px solid var(--line); padding-top: 12px;
+  }
+  summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  .spec { margin-top: 14px; color: #334155; font-size: 13.5px; }
+  .spec p { margin: 0 0 10px; }
+  .vers { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin: 8px 0 14px; }
+  .vers dt { color: var(--violet-ink); font-weight: 600; }
+  .vers dd { margin: 0; color: #334155; }
+  .links { margin-top: 18px; font-size: 13px; }
+  .links a { color: var(--blue-ink); text-decoration: none; margin-right: 16px; }
+  .links a:hover { text-decoration: underline; }
+  @media (max-width: 760px) {
+    .wrap { padding: 28px 16px 56px; }
+    h1 { font-size: 32px; }
+    .tabs { flex-wrap: nowrap; overflow-x: auto; }
+    .tab { flex: none; }
+    .chart-head { display: none; }
+    .chart-row { display: block; padding-top: 8px; }
+    .r-name { padding-top: 8px; }
+    .r-track { height: 36px; margin: 6px 0 8px; }
+    .r-nums {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 16px;
+    }
+    .r-nums .num { white-space: nowrap; }
+    .r-nums .num, .r-nums .num small { text-align: left; }
+    .r-nums .num::before {
+      content: attr(data-k);
+      display: block;
+      margin-bottom: 1px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--faint);
+      text-align: left;
+    }
+    .axis-note { display: flex; justify-content: space-between; margin: 4px 0 0; }
+    .axis-note span { grid-column: auto; }
+    .metrics { grid-template-columns: 1fr 1fr; }
+    .metrics-time { grid-template-columns: minmax(0, 240px); }
+    .metric .num { font-size: 30px; }
+    .times { grid-template-columns: 1fr; }
+    .cases li { flex-direction: column; gap: 2px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+.suite-switch{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.suite-switch button{font:inherit;font-size:14px;padding:9px 15px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--muted);cursor:pointer}.suite-switch button[aria-pressed="true"]{background:var(--blue);border-color:var(--blue);color:white}.suite-switch button:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.overview-scope{font-size:13px;color:var(--muted);margin:0 0 16px}.status-card[hidden]{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>QLLVM 编译性能测试报告</h1>
+  <p class="when">2026-11-17 14:18 — 2026-11-19 13:41</p>
+
+  <div class="tabs" role="tablist" aria-label="对比对象">
+    <button class="tab" id="tab-overview" role="tab" aria-controls="panel-overview" data-kind="home" aria-selected="true">总览</button>
+    <button class="tab" id="tab-qiskit" role="tab" aria-controls="panel-qiskit" data-kind="peer">Qiskit</button>
+    <button class="tab" id="tab-tket" role="tab" aria-controls="panel-tket" data-kind="peer">TKET</button>
+    <button class="tab" id="tab-qpanda3" role="tab" aria-controls="panel-qpanda3" data-kind="peer">QPanda3</button>
+    <button class="tab" id="tab-pennylane" role="tab" aria-controls="panel-pennylane" data-kind="peer">PennyLane</button>
+    <button class="tab" id="tab-qpanda" role="tab" aria-controls="panel-qpanda" data-kind="peer">QPanda</button>
+  </div>
+
+  <section class="panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <div class="suite-switch" role="group" aria-label="总览测试集">
+      <button type="button" data-suite="" aria-pressed="true">全部测试集</button>
+      <button type="button" data-suite="mqtbench" aria-pressed="false">MQT Bench</button>
+      <button type="button" data-suite="qasmbench" aria-pressed="false">QASMBench</button>
+      <button type="button" data-suite="benchpress" aria-pressed="false">Benchpress</button>
+    </div>
+    <p class="overview-scope" id="overview-scope" aria-live="polite">全部测试集</p>
+    <div class="chart">
+      <div class="legend">
+        <span><i class="i-gate"></i>总门数</span>
+        <span><i class="i-depth"></i>线路深度</span>
+        <span><i class="i-two"></i>双比特门</span>
+      </div>
+      <div class="chart-head">
+        <span></span><span></span>
+        <span class="h-gate">总门数<span class="unit">缩减率 %</span></span>
+        <span class="h-two">双比特门<span class="unit">缩减率 %</span></span>
+        <span class="h-depth">深度<span class="unit">缩减率 %</span></span>
+        <span class="h-time">加速比<span class="unit">倍</span></span>
+      </div>
+      <div id="overview-rows"></div>
+    </div>
+    <p class="note"><b>测试说明</b>基准测试集采用 MQT Bench、QASMBench、Benchpress 等常用公开测试集，基础门组采用 Rx、Ry、Rz、Cz、H、X、Y、Z，测试后端为全连接 QASM 模拟器。</p>
+  </section>
+
+  <section class="panel" id="panel-qiskit" role="tabpanel" aria-labelledby="tab-qiskit" hidden></section>
+  <section class="panel" id="panel-tket" role="tabpanel" aria-labelledby="tab-tket" hidden></section>
+  <section class="panel" id="panel-qpanda3" role="tabpanel" aria-labelledby="tab-qpanda3" hidden></section>
+  <section class="panel" id="panel-pennylane" role="tabpanel" aria-labelledby="tab-pennylane" hidden></section>
+  <section class="panel" id="panel-qpanda" role="tabpanel" aria-labelledby="tab-qpanda" hidden></section>
+
+  <section class="close">
+    <h2>测试结果概述</h2>
+    <p><b>优化能力。</b>QLLVM 通常能减少总门数、降低线路深度；双比特门数落后于 Qiskit、TKET、QPanda3，与 PennyLane 基本相当。</p>
+    <p><b>编译效率。</b>编译速度尚无优势，较大电路超时较多。下一步应先做阶段计时，定位 QFT、QV、Shor，并针对双比特门变换做消融。</p>
+  </section>
+
+  <section class="detail" id="detail" hidden>
+    <h2>详细测试结果及分析</h2>
+    <div id="detail-figures"></div>
+  </section>
+
+  <details>
+    <summary>测试口径与版本</summary>
+    <div class="spec">
+      <dl class="vers">
+        <dt>QLLVM</dt><dd>本地固定二进制 · 2026-11-01 · O1</dd>
+        <dt>Qiskit</dt><dd>2.6.1 · 2026-10-22 · opt3</dd>
+        <dt>TKET</dt><dd>2.18.5 · 2026-10-08 · FullPeephole + AutoRebase</dd>
+        <dt>QPanda</dt><dd>3.8.5 · 2025-05-13 · 原生合并优化 + 基础门转换</dd>
+        <dt>QPanda3</dt><dd>0.5.1 · 2026-10-26 · Transpiler opt2</dd>
+        <dt>PennyLane</dt><dd>0.45.1 · 2026-06-26 · compile，2 passes</dd>
+      </dl>
+      <p>环境：Intel Xeon Gold 6133 @ 2.50 GHz，双路 40 物理核 / 80 逻辑核，约 125 GiB 内存；Linux，Python 3.11。单线程串行，预热 1 次、正式测量 3 次，每个 worker 超时 120 秒，内存限制 8 GiB。电路不超过 128 比特，输入不超过 8 MiB。</p>
+      <p>比较取相同输入的三次中位数。缩减率 = (1 − 几何均值(QLLVM / 对手)) × 100%，负值表示 QLLVM 输出规模更大；只统计双方都有非零有效值的用例。输出门集为 RX、RY、RZ、CZ、H、X、Y、Z。耗时包含读取、优化和导出；QLLVM 含 CLI 启动，SDK 导入和指标采集不计时。加速比 = 几何均值(对比编译器耗时 / QLLVM 耗时)，大于 1 表示 QLLVM 更快。</p>
+      <p>测试集进度：MQT Bench 144/144，QASMBench 153/258，Benchpress 306/656。</p>
+    </div>
+  </details>
+
+</div>
+<script>
+const SCALE = 80;
+const peers = [];
+const overviewStatus = {};
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+}
+function addBar(track, value, cls, labeled) {
+  if (value == null) return;
+  const n = parseFloat(value);
+  if (!n) return;
+  const w = Math.min(50, Math.abs(n) / SCALE * 50);
+  const bar = el("span", "bar " + cls);
+  bar.style.width = w + "%";
+  bar.style.left = (n > 0 ? 50 : 50 - w) + "%";
+  track.appendChild(bar);
+  if (!labeled) return;
+  const lab = el("span", "bar-lab " + cls + (n > 0 ? " pos" : " neg"), value);
+  lab.style.left = (n > 0 ? 50 + w : 50 - w) + "%";
+  track.appendChild(lab);
+}
+function numCell(value, cls, suffix) {
+  const cell = el("div", "num " + cls);
+  cell.textContent = value == null ? "—" : value + suffix;
+  return cell;
+}
+function trackFor(peer, labeled) {
+  const track = el("div", "r-track");
+  track.appendChild(el("span", "zero"));
+  if (peer.gates == null) {
+    track.appendChild(el("span", "na", peer.time == null ? "待配对数据" : "门集不一致"));
+    return track;
+  }
+  addBar(track, peer.gates, "gate", labeled);
+  addBar(track, peer.depth, "depth", labeled);
+  addBar(track, peer.two, "two", labeled);
+  return track;
+}
+function row(peer, labeled) {
+  const line = el("div", "chart-row");
+  const nums = el("div", "r-nums");
+  [
+    [peer.gates, "c-gate", "%", "总门数缩减率", peer.nGates],
+    [peer.two, "c-two", "%", "双比特门缩减率", peer.nTwo],
+    [peer.depth, "c-depth", "%", "深度缩减率", peer.nDepth],
+    [peer.time, "c-time", "×", "加速比", peer.nTime]
+  ].forEach(([value, cls, suffix, label, n]) => {
+    const cell = numCell(value, cls, suffix);
+    cell.dataset.k = label;
+    nums.appendChild(cell);
+  });
+  line.append(el("div", "r-name", peer.name), trackFor(peer, labeled), nums);
+  return line;
+}
+function suiteRow(item) {
+  const peer = { name: item[0], gates: item[1], nGates: "", two: item[2], nTwo: "", depth: item[3], nDepth: "", time: item[4], nTime: "" };
+  const line = row(peer);
+  line.querySelectorAll("small").forEach((s) => s.remove());
+  return line;
+}
+function heroMetric(value, n, kind) {
+  const box = el("div", "metric");
+  const num = el("div", "num");
+  const cap = el("div", "cap");
+  if (value == null) {
+    num.classList.add("tone-muted");
+    num.textContent = "—";
+    cap.textContent = "不比较";
+  } else if (kind === "time") {
+    const v = parseFloat(value);
+    num.classList.add(v > 1 ? "tone-blue" : v < 1 ? "tone-violet" : "tone-muted");
+    num.textContent = value + "×";
+    cap.textContent = v === 1 ? "编译速度持平" : v > 1 ? "QLLVM 更快" : "QLLVM 更慢";
+  } else {
+    const v = parseFloat(value);
+    num.classList.add(v > 0 ? "tone-blue" : v < 0 ? "tone-violet" : "tone-muted");
+    num.textContent = Math.abs(v).toFixed(1) + "%";
+    const name = kind === "depth" ? "深度" : kind === "two" ? "双比特" : "总门数";
+    cap.textContent = v === 0 ? name + "持平" : name + (v > 0 ? "下降" : "上升");
+  }
+  box.append(num, cap);
+  return box;
+}
+function renderPeer(peer) {
+  const panel = document.getElementById("panel-" + peer.id);
+  panel.appendChild(el("h2", "peer-title", "QLLVM 相对 " + peer.name + " 的性能提升"));
+  const metrics = el("div", "metrics");
+  if (peer.gates == null) {
+    metrics.classList.add("metrics-time");
+    metrics.append(heroMetric(peer.time, peer.nTime, "time"));
+  } else {
+    metrics.append(
+      heroMetric(peer.gates, peer.nGates, "gates"),
+      heroMetric(peer.two, peer.nTwo, "two"),
+      heroMetric(peer.depth, peer.nDepth, "depth"),
+      heroMetric(peer.time, peer.nTime, "time")
+    );
+  }
+  panel.append(metrics);
+  if (peer.suites) {
+    panel.appendChild(el("div", "block-label", "各基准测试集对比结果"));
+    const chart = el("div", "chart");
+    chart.appendChild(el("div", "legend", ""));
+    const legend = chart.querySelector(".legend");
+    legend.append(el("span", "", ""));
+    legend.innerHTML = '<span><i class="i-gate"></i>总门数</span><span><i class="i-depth"></i>线路深度</span><span><i class="i-two"></i>双比特门</span>';
+    const head = el("div", "chart-head");
+    [
+      ["", ""],
+      ["", ""],
+      ["总门数", "缩减%", "h-gate"],
+      ["双比特", "缩减%", "h-two"],
+      ["深度", "缩减%", "h-depth"],
+      ["加速比", "倍", "h-time"]
+    ].forEach(([title, unit, cls]) => {
+      const s = el("span", cls, title);
+      if (unit) s.appendChild(el("span", "unit", unit));
+      head.appendChild(s);
+    });
+    chart.appendChild(head);
+    peer.suites.forEach((item) => chart.appendChild(suiteRow(item)));
+    const note = el("div", "axis-note");
+    note.append(el("span", "", "QLLVM 更大"), el("span", "", "QLLVM 更小"));
+    chart.appendChild(note);
+    panel.appendChild(chart);
+  }
+}
+peers.forEach(renderPeer);
+function renderOverview(suite) {
+  const box = document.getElementById('overview-rows');
+  box.replaceChildren();
+  peers.forEach(peer => box.appendChild(row(suite ? {...peer,...peer.bySuite[suite]} : peer, true)));
+  const buttons = document.querySelectorAll('.suite-switch button');
+  buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.suite === suite)));
+  const label = Array.from(buttons).find(button => button.dataset.suite === suite).textContent;
+  document.getElementById('overview-scope').textContent = label + ' · 各指标按该范围独立配对统计';
+  document.querySelectorAll('.status-card').forEach(card => {card.hidden = !!suite && card.dataset.suite !== suite;});
+  const selected = suite ? overviewStatus.suites.find(item => item.suite === suite) : overviewStatus;
+  const summary = document.querySelector('.status-heading p');
+  summary.replaceChildren();
+  [['已测', selected.tested, '项'],['完成', selected.passed, '项'],['完成率', selected.pass_pct.toFixed(1), '%']].forEach(([name,value,unit],i) => {
+    summary.append(document.createTextNode((i ? ' · ' : '') + name + ' '),el('b','',String(value)),document.createTextNode(unit));
+  });
+  if (selected.pending != null) summary.append(document.createTextNode(' · 待复测 '),el('b','',String(selected.pending)),document.createTextNode(' 项'));
+  const filter = document.getElementById('case-suite');
+  if (filter) {filter.value = suite;filter.dispatchEvent(new Event('change'));}
+}
+document.querySelectorAll('.suite-switch button').forEach(button => button.addEventListener('click',() => renderOverview(button.dataset.suite)));
+renderOverview('');
+
+const caseSeries = {};
+const caseNames = {qiskit:"Qiskit", tket:"TKET", qpanda3:"QPanda3", pennylane:"PennyLane", qpanda:"QPanda"};
+function symlog(v) {
+  const lin = 100, adj = 1 / 0.9;
+  const a = Math.abs(v);
+  if (a <= lin) return Math.sign(v) * a * adj;
+  return Math.sign(v) * lin * (adj + Math.log(a / lin) / Math.LN10);
+}
+function svgEl(name, attrs, text) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.keys(attrs).forEach((k) => node.setAttribute(k, attrs[k]));
+  if (text != null) node.textContent = text;
+  return node;
+}
+function drawCases(series, who) {
+  const metrics = [
+    ["gates", "总门数 %", "#227C9D"],
+    ["two", "双比特门 %", "#E19A38"],
+    ["depth", "深度 %", "#7B6DAA"]
+  ];
+  const n = series.gates.length;
+  const W = 980, L = 78, R = 18, panelH = 128, gap = 10, head = 8, foot = 26;
+  const H = head + metrics.length * panelH + (metrics.length - 1) * gap + foot;
+  const plotW = W - L - R;
+  const svg = svgEl("svg", {viewBox: "0 0 " + W + " " + H, role: "img"});
+  svg.setAttribute("aria-label", "QLLVM 相对 " + who + " 的逐案例缩减率");
+  svg.style.fontFamily = "inherit";
+  metrics.forEach(([key, label, color], pi) => {
+    const vals = series[key];
+    let lo = 0, hi = 0;
+    vals.forEach((v) => {
+      if (v == null) return;
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    });
+    const y0 = head + pi * (panelH + gap);
+    const plotH = panelH - 22;
+    const T = y0 + 8;
+    const pad = Math.max(8, (symlog(hi) - symlog(lo)) * 0.08);
+    const top = symlog(hi) + pad, bot = symlog(lo) - pad;
+    const yOf = (v) => T + (top - symlog(v)) / (top - bot) * plotH;
+    const xOf = (i) => L + ((i + 0.5) / n) * plotW;
+    const bw = Math.max(0.55, (plotW / n) * 0.82);
+    const zero = yOf(0);
+    svg.appendChild(svgEl("line", {x1: L, x2: W - R, y1: zero, y2: zero, stroke: "#444", "stroke-width": "0.7"}));
+    [-10000, -1000, -100, 0, 100, 1000, 10000].forEach((tick) => {
+      const s = symlog(tick);
+      if (s < bot || s > top) return;
+      const y = yOf(tick);
+      svg.appendChild(svgEl("text", {x: L - 8, y: y + 3, "text-anchor": "end", fill: "#64748b", "font-size": "11"}, String(tick)));
+    });
+    if (pi === 0) {
+      series.suites.forEach((suite, si) => {
+        if (si === 0) return;
+        const x = L + ((suite[1] - 1) / n) * plotW;
+        metrics.forEach((_, k) => {
+          const yy = head + k * (panelH + gap);
+          svg.appendChild(svgEl("line", {x1: x, x2: x, y1: yy + 4, y2: yy + panelH - 16, stroke: "#94a3b8", "stroke-dasharray": "2 3", "stroke-width": "0.8"}));
+        });
+      });
+      series.suites.forEach((suite) => {
+        const mid = ((suite[1] + suite[2]) / 2 - 0.5) / n;
+        svg.appendChild(svgEl("text", {x: L + mid * plotW, y: y0 + 2, "text-anchor": "middle", fill: "#334155", "font-size": "12"}, suite[0]));
+      });
+    } else {
+      series.suites.forEach((suite, si) => {
+        if (si === 0) return;
+        const x = L + ((suite[1] - 1) / n) * plotW;
+        svg.appendChild(svgEl("line", {x1: x, x2: x, y1: y0 + 4, y2: y0 + panelH - 16, stroke: "#94a3b8", "stroke-dasharray": "2 3", "stroke-width": "0.8"}));
+      });
+    }
+    vals.forEach((v, i) => {
+      if (v == null || v === 0) return;
+      const y = yOf(v);
+      const h = Math.max(0.6, Math.abs(y - zero));
+      svg.appendChild(svgEl("rect", {
+        x: xOf(i) - bw / 2,
+        y: Math.min(y, zero),
+        width: bw,
+        height: h,
+        fill: v >= 0 ? color : "#BF4B45"
+      }));
+    });
+    svg.appendChild(svgEl("text", {
+      x: 16, y: T + plotH / 2, fill: "#334155", "font-size": "12",
+      transform: "rotate(-90 16 " + (T + plotH / 2) + ")"
+    }, label));
+  });
+  svg.appendChild(svgEl("text", {x: L + plotW / 2, y: H - 8, "text-anchor": "middle", fill: "#64748b", "font-size": "12"}, "对比用例编号"));
+  return svg;
+}
+function renderDetail(id) {
+  const section = document.getElementById("detail");
+  const box = document.getElementById("detail-figures");
+  if (id === "overview" || !caseSeries[id]) {
+    section.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  section.hidden = false;
+  box.replaceChildren();
+  const series = caseSeries[id];
+  const any = series.gates.some((v) => v != null) || series.two.some((v) => v != null) || series.depth.some((v) => v != null);
+  if (!any) {
+    box.appendChild(el("p", "quiet", caseNames[id] + " 输出门集与目标门集不一致，没有逐用例门数与深度图。"));
+    return;
+  }
+  const fig = document.createElement("figure");
+  fig.appendChild(drawCases(series, caseNames[id]));
+  const cap = document.createElement("figcaption");
+  cap.textContent = "QLLVM 相对 " + caseNames[id] + " 的逐案例缩减率。正值为优势，±100% 内为线性，外侧为对数；红色为劣势。零差异或不适用时不显示柱。";
+  fig.appendChild(cap);
+  box.appendChild(fig);
+}
+const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+function select(id, focus) {
+  tabs.forEach((tab) => {
+    const on = tab.id === "tab-" + id;
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on ? 0 : -1;
+    document.getElementById(tab.getAttribute("aria-controls")).hidden = !on;
+    if (on && focus) tab.focus();
+  });
+  renderDetail(id);
+  if (history.replaceState) history.replaceState(null, "", "#" + id);
+}
+tabs.forEach((tab, i) => {
+  tab.addEventListener("click", () => select(tab.id.slice(4), false));
+  tab.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const next = e.key === "ArrowRight" ? (i + 1) % tabs.length : (i - 1 + tabs.length) % tabs.length;
+    select(tabs[next].id.slice(4), true);
+  });
+});
+const initial = (location.hash || "#overview").slice(1);
+select(peers.some((p) => p.id === initial) || initial === "overview" ? initial : "overview", false);
+</script>
+</body>
+</html>
