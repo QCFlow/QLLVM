@@ -11,45 +11,13 @@
  * Modified by QCFlow (2026) for QLLVM project.
  *******************************************************************************/
 #include "openqasmv3_mlir_generator.hpp"
+#include <cctype>
+#include <chrono>
 
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "qasm3Lexer.h"
 #include "qasm3Parser.h"
 #include "qasm3_visitor.hpp"
-
-#include "BailErrorStrategy.h"
-#include "DefaultErrorStrategy.h"
-#include "atn/ParserATNSimulator.h"
-
-#include <memory>
-
-namespace {
-
-// SLL resolves the common statement forms. Context-sensitive input throws
-// ParseCancellationException and is parsed again with full LL.
-qasm3::qasm3Parser::ProgramContext *
-parseQasmProgram(qasm3::qasm3Parser &parser, antlr4::CommonTokenStream &tokens,
-                 antlr4::ANTLRErrorListener *listener) {
-  parser.removeErrorListeners();
-  parser.setErrorHandler(std::make_shared<antlr4::BailErrorStrategy>());
-  parser.getInterpreter<antlr4::atn::ParserATNSimulator>()->setPredictionMode(
-      antlr4::atn::PredictionMode::SLL);
-  try {
-    return parser.program();
-  } catch (const antlr4::ParseCancellationException &) {
-    tokens.reset();
-    parser.reset();
-    parser.removeErrorListeners();
-    if (listener)
-      parser.addErrorListener(listener);
-    parser.setErrorHandler(std::make_shared<antlr4::DefaultErrorStrategy>());
-    parser.getInterpreter<antlr4::atn::ParserATNSimulator>()->setPredictionMode(
-        antlr4::atn::PredictionMode::LL);
-    return parser.program();
-  }
-}
-
-}  // namespace
 
 namespace qllvm {
 
@@ -95,6 +63,7 @@ void OpenQasmV3MLIRGenerator::initialize_mlirgen(
     bool _add_entry_point, const std::string function,
     std::map<std::string, std::string> extra_quantum_args) {
   file_name = function;
+  traceFrontend = extra_quantum_args.count("_qllvm_trace_frontend");
   add_entry_point = _add_entry_point;
 
   // Only enable the rewrite to NISQ If-statements when the compilation 
@@ -207,17 +176,89 @@ void OpenQasmV3MLIRGenerator::initialize_mlirgen(
   }
 }
 
+// Modified for correctness: this legacy lexer requires a decimal point in
+// exponent literals. Normalize only numeric tokens, retaining identifiers,
+// comments, and quoted include paths verbatim.
+static std::string normalizeExponentLiterals(const std::string &source) {
+  // Modified 2026-11-19: a linear token scan avoids constructing millions of
+  // regex matches for generated benchmark circuits. Preserve quoted strings,
+  // comments and identifier tokens exactly; only rewrite an integer mantissa
+  // with a complete exponent (e.g. 12e-3 -> 12.0e-3).
+  std::string result;
+  result.reserve(source.size());
+  auto digit = [](char ch) { return ch >= '0' && ch <= '9'; };
+  auto alpha = [](char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+  };
+  size_t i = 0;
+  while (i < source.size()) {
+    const size_t begin = i;
+    if (source[i] == '"') {
+      ++i;
+      while (i < source.size()) {
+        if (source[i] == '\\' && i + 1 < source.size()) { i += 2; continue; }
+        if (source[i++] == '"') break;
+      }
+    } else if (source.compare(i, 2, "//") == 0) {
+      auto end = source.find('\n', i + 2);
+      i = end == std::string::npos ? source.size() : end;
+    } else if (source.compare(i, 2, "/*") == 0) {
+      auto end = source.find("*/", i + 2);
+      i = end == std::string::npos ? source.size() : end + 2;
+    } else if (alpha(source[i])) {
+      while (i < source.size() && (alpha(source[i]) || digit(source[i]))) ++i;
+    } else if (digit(source[i]) ||
+               (source[i] == '.' && i + 1 < source.size() && digit(source[i+1]))) {
+      while (i < source.size() && digit(source[i])) ++i;
+      bool decimal = false;
+      if (i < source.size() && source[i] == '.') {
+        decimal = true;
+        ++i;
+        while (i < source.size() && digit(source[i])) ++i;
+      }
+      const size_t exponent = i;
+      if (i < source.size() && (source[i] == 'e' || source[i] == 'E')) {
+        size_t end = i + 1;
+        if (end < source.size() && (source[end] == '+' || source[end] == '-')) ++end;
+        const size_t digits = end;
+        while (end < source.size() && digit(source[end])) ++end;
+        if (end != digits) {
+          i = end;
+          if (!decimal) {
+            result.append(source, begin, exponent - begin);
+            result += ".0";
+            result.append(source, exponent, i - exponent);
+            continue;
+          }
+        }
+      }
+    } else {
+      ++i;
+    }
+    result.append(source, begin, i - begin);
+  }
+  return result;
+}
+
 void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
   using namespace antlr4;
   using namespace qasm3;
+  using Clock = std::chrono::steady_clock;
+  const auto frontendStart = Clock::now();
+  auto previous = frontendStart;
+  auto mark = [&](const char *phase) {
+    if (!traceFrontend) return;
+    const auto now = Clock::now();
+    std::cerr << "[qllvm-frontend] phase=" << phase << " seconds="
+              << std::chrono::duration<double>(now-previous).count() << "\n";
+    previous = now;
+  };
 
   if (!visitor) {
     visitor = std::make_shared<qasm3_visitor>(builder, m_module, file_name,
                                               enable_qir_apply_ifelse);
   }
 #ifndef ZHUYU_202410
-  std::string src_copy = src;
-  std::string src_new;
   // Make sure we have the preamble text
   
   std::string preamble = "OPENQASM 3;";
@@ -234,38 +275,11 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
                  "preamble text.\n";
     exit(1);
   }
-  // Add any required missing pre-defines that we 
-  // know the impl for.
-  std::vector<std::string> added;
-  std::string extra_insts = "\n";
-
-  auto lines = split(src, '\n');
-  for (auto line : lines) {
-    if (line.find("OPENQASM") == std::string::npos &&
-        line.find("include") == std::string::npos &&
-        line.find("measure") == std::string::npos &&
-        line.find("qreg") == std::string::npos &&
-        line.find("creg") == std::string::npos && !line.empty()) {
-      line.erase(0, line.find_first_not_of(" "));
-      auto inst_name = split(line, ' ')[0];
-      if (inst_name.find("(") != std::string::npos) {
-        inst_name = inst_name.substr(0, inst_name.find("("));
-      }
-
-      // if (inst_name != "id") {
-      //   src_new += line;
-      //   src_new += "\n";
-      // }
-      src_new += line;
-      src_new += "\n";
-    }else {
-      src_new += line;
-      src_new += "\n";
-    }
-  }
-  //src_copy.insert(preamble_start+preamble.length(), extra_insts);
-  src_new.insert(preamble_start+preamble.length(), extra_insts);
-  //ANTLRInputStream input(src_copy);
+  // Modified 2026-11-21: the old loop only trimmed leading whitespace and
+  // rebuilt the same text while retaining a vector copy of every line. Gate
+  // names and the copied source were unused. Let the lexer handle whitespace,
+  // retaining comments/newlines and the required exponent normalization.
+  const std::string src_new = normalizeExponentLiterals(src);
   ANTLRInputStream input(src_new);
 #else
   ANTLRInputStream input(src);
@@ -273,6 +287,7 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
   qasm3Lexer lexer(&input);
   CommonTokenStream tokens(&lexer);
   qasm3Parser parser(&tokens);
+  mark("preprocess");
 
   class Qasm3ParserErrorListener : public BaseErrorListener {
    private:
@@ -288,20 +303,52 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
          << "\n";
       ss << "occurred at " << file_name << ":" << line << ":"
          << charPositionInLine
-         << ", offending symbol = " << offendingSymbol->getText() << "\n\n";
+         << ", offending symbol = "
+         << (offendingSymbol ? offendingSymbol->getText() : "<lexer>") << "\n\n";
       std::cout << ss.str();
       exit(1);
     }
   };
 
-  // Setup our custom error listeners. The fast parse installs this listener
-  // only if it falls back to full LL.
+  // Setup our custom error listeners
   lexer.removeErrorListeners();
   parser.removeErrorListeners();
   Qasm3ParserErrorListener el(file_name);
+  lexer.addErrorListener(&el);
+  if (traceFrontend) {
+    tokens.fill(); // Explicitly separate lexer cost only in diagnostic mode.
+    mark("tokenize");
+  }
 
-  tree::ParseTree *tree = parseQasmProgram(parser, tokens, &el);
+  // Modified 2026-11-19: avoid full-context prediction for every gate in
+  // long flat circuits. Retry from the beginning in LL mode on an SLL
+  // ambiguity; never visit a partial tree or recover silently from bad input.
+  tree::ParseTree *tree = nullptr;
+  parser.getInterpreter<atn::ParserATNSimulator>()->setPredictionMode(
+      atn::PredictionMode::SLL);
+  parser.setErrorHandler(std::make_shared<BailErrorStrategy>());
+  try {
+    tree = parser.program();
+    if (tokens.LA(1) != Token::EOF)
+      throw ParseCancellationException("Trailing tokens after program");
+  } catch (const ParseCancellationException &) {
+    tokens.seek(0);
+    parser.reset();
+    parser.getInterpreter<atn::ParserATNSimulator>()->setPredictionMode(
+        atn::PredictionMode::LL);
+    parser.setErrorHandler(std::make_shared<DefaultErrorStrategy>());
+    parser.addErrorListener(&el);
+    tree = parser.program();
+  }
+  if (tokens.LA(1) != Token::EOF) {
+    auto *token = tokens.LT(1);
+    el.syntaxError(&parser, token, token->getLine(),
+                   token->getCharPositionInLine(),
+                   "Unexpected trailing token after program", nullptr);
+  }
+  mark("parse");
   visitor->visitChildren(tree);
+  mark("mlir-generate");
   return;
 }
 

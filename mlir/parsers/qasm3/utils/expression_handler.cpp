@@ -284,7 +284,25 @@ antlrcpp::Any qasm3_expression_generator::visitComparsionExpression(
     } else {
       internal_value_type = lhs.getType();
     }
-    visitChildren(compare->expression(1));
+    // Modified 2026-11-21: whole-creg equality constants are unsigned bit
+    // patterns. Do not pass values >= 2^63 through stoll/float fallback, which
+    // loses integer type and can round distinct conditions to the same value.
+    bool exactCregConstant = false;
+    if (auto reg = lhs.getType().dyn_cast<mlir::MemRefType>()) {
+      const std::string literal = compare->expression(1)->getText();
+      const bool decimal = !literal.empty() &&
+          std::all_of(literal.begin(), literal.end(),
+                      [](char c) { return c >= '0' && c <= '9'; });
+      if (reg.getRank() == 1 && reg.getElementType().isInteger(1) && decimal) {
+        uint64_t value = 0;
+        if (llvm::StringRef(literal).getAsInteger(10, value))
+          throw std::runtime_error("Classical comparison constant exceeds supported 64-bit unsigned range");
+        auto attr = mlir::IntegerAttr::get(builder.getI64Type(), llvm::APInt(64, value));
+        update_current_value(builder.create<mlir::ConstantOp>(location, attr));
+        exactCregConstant = true;
+      }
+    }
+    if (!exactCregConstant) visitChildren(compare->expression(1));
     auto rhs = current_value;
 
     // OpenQASM 2: `if (c == k)` uses the integer value of the whole `creg`.

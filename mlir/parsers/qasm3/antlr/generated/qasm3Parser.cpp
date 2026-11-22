@@ -5533,28 +5533,14 @@ qasm3Parser::ExpressionContext* qasm3Parser::expression(int precedence) {
     enterOuterAlt(_localctx, 1);
     setState(591);
     _errHandler->sync(this);
-    switch (getInterpreter<atn::ParserATNSimulator>()->adaptivePredict(_input, 44, _ctx)) {
-    case 1: {
-      setState(588);
-      expressionTerminator(0);
-      break;
-    }
-
-    case 2: {
-      setState(589);
-      unaryExpression();
-      break;
-    }
-
-    case 3: {
-      setState(590);
-      xOrExpression(0);
-      break;
-    }
-
-    default:
-      break;
-    }
+    // QLLVM modification (2026-11-19): factor the redundant base alternatives
+    // expressionTerminator | unaryExpression | xOrExpression into xOrExpression.
+    // Its precedence chain already ends in both of the former alternatives.
+    // Predicting among them makes SLL stop at the atom in e.g. pi/2 and forces
+    // expensive full-context prediction on every parameter in flat circuits.
+    // Keep the generated context shape and ATN state numbers for compatibility.
+    setState(590);
+    xOrExpression(0);
     _ctx->stop = _input->LT(-1);
     setState(598);
     _errHandler->sync(this);

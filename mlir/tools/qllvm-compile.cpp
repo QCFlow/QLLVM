@@ -97,8 +97,14 @@ int main(int argc, char** argv) {
   cl::ParseCommandLineOptions(argc, argv, "qllvm quantum assembly compiler\n");
 
   if (mlir_debug_dialect_conversion) {
+#ifndef NDEBUG
+    // LLVM's debug helpers are macros/no-ops in optimized builds.
+#ifndef NDEBUG
+    // LLVM's debug helpers are macros/no-ops in optimized builds.
     llvm::DebugFlag = true;
     llvm::setCurrentDebugType("dialect-conversion");
+#endif
+#endif
   }
 
   qllvm::CompilationOptions opts;

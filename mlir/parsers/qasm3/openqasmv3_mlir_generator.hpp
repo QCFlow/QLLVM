@@ -21,6 +21,7 @@ class qasm3_visitor;
 class OpenQasmV3MLIRGenerator : public qllvm::QuantumMLIRGenerator {
  protected:
   std::shared_ptr<qasm3_visitor> visitor;
+  bool traceFrontend = false;
 
  public:
   OpenQasmV3MLIRGenerator(mlir::MLIRContext &context)
