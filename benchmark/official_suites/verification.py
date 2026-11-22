@@ -107,6 +107,9 @@ def verify_terminal_classical(original, compiled, max_qubits, tolerance):
         return {"status": "unsupported", "reason": str(exc)}
 
 def verify(original, compiled, max_qubits, tolerance, semantics="coherent"):
+    if semantics == "instrument":
+        from instrument_verification import verify_instrument
+        return verify_instrument(original, compiled, max_qubits, tolerance)
     if semantics not in ("coherent", "terminal-classical"):
         raise ValueError("Unknown semantic contract: " + semantics)
     operator = _operator_verify(original,compiled,max_qubits,tolerance)

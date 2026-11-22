@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Run a single framework in a bounded worker process. Never simulate hardware."""
 import argparse
+import hashlib
 import importlib.metadata
 import json
 from pathlib import Path
 import subprocess
 import sys
 import time
+import re
+import os
 
 ROOT = Path(__file__).resolve().parent
 BASIS = ["rx", "ry", "rz", "cz", "h", "x", "y", "z"]
@@ -20,24 +23,125 @@ def load_qasm(path):
 
 
 def gate_metrics(circuit):
-    gates = [x for x in circuit.data if x.operation.name not in ("measure", "barrier")]
+    from collections import Counter
+    def operations(scope):
+        for inst in scope.data:
+            if inst.operation.name == "if_else":
+                for body in inst.operation.blocks:
+                    yield from operations(body)
+            else:
+                yield inst
+    instructions = list(operations(circuit))
+    gates = [x for x in instructions if x.operation.name not in ("measure", "barrier")]
     return {"qubits": circuit.num_qubits, "classical_bits": circuit.num_clbits,
             "gates": len(gates), "two_qubit_gates": sum(x.operation.num_qubits == 2 for x in gates),
-            "depth": circuit.depth(), "operations": dict(circuit.count_ops())}
+            "depth": circuit.depth(), "operations": dict(Counter(x.operation.name for x in instructions))}
 
 
 def prepare(path, output):
     from qiskit import qasm2, transpile
-    circuit = load_qasm(path)
+    source = path.read_text()
+    if "OPENQASM 3" in source[:4096]:
+        circuit = load_qasm(path)
+    else:
+        normalized, changes = normalize_qasm2_input(source)
+        circuit = qasm2.loads(normalized,
+                              custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
+        if changes:
+            output.with_suffix(".normalization.json").write_text(
+                json.dumps({"source": str(path), "changes": changes,
+                            "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                            "normalized_sha256": hashlib.sha256(normalized.encode()).hexdigest()},
+                           indent=2) + "\n")
     # Universal, target-independent serialization only, shared by every compiler.
     lowered = transpile(circuit, basis_gates=["u3", "cx"], optimization_level=0,
                         seed_transpiler=12345)
-    output.write_text(qasm2.dumps(lowered) + "\n")
+    from dynamic_qasm import has_feedback, serialize_dynamic_qasm2
+    dynamic = "OPENQASM 3" in source[:4096] and has_feedback(lowered)
+    output.write_text(serialize_dynamic_qasm2(lowered) if dynamic else qasm2.dumps(lowered) + "\n")
     from verification import verify
-    check = verify(circuit, load_qasm(output), 6, 1e-7, "coherent")
+    check = verify(circuit, load_qasm(output), 6, 1e-7, "instrument" if dynamic else "coherent")
+    if dynamic:
+        output.with_suffix(".serialization.json").write_text(json.dumps(check, indent=2) + "\n")
+        if check["status"] != "passed":
+            raise NotImplementedError("Dynamic serialization requires a passed instrument check: " + str(check))
     if check["status"] == "failed":
         raise RuntimeError("Shared serialization failed semantic check: " + str(check))
     return gate_metrics(lowered)
+
+
+def normalize_qasm2_input(source):
+    """Repair only deterministic missing register declarations in QASM2.
+
+    Several QASMBench VQE files declare one qreg (``reg``) but use ``q[i]`` in
+    terminal measurements, and omit the corresponding creg. A single qreg and
+    a complete identity measurement map make this repair unambiguous. Multiple
+    qregs, nonterminal aliases, partial maps, and dynamic input are rejected
+    with a specific diagnostic instead of guessed wire identities. Exact known
+    HHL archive hashes may restore the verified prior official unmeasured body.
+    """
+    from input_repairs import restore_archived_hhl
+    restored, changes = restore_archived_hhl(source)
+    if changes:
+        return restored, changes
+    if "OPENQASM 2" not in source[:4096]:
+        return source, []
+    # Mask comments and quoted strings without changing source offsets. Only
+    # actual code may supply declarations or measurement mapping evidence.
+    masked = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',
+                    lambda m: re.sub(r"[^\n]", " ", m.group()), source)
+    qregs = list(re.finditer(r"\bqreg\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;", masked))
+    cregs = re.findall(r"\bcreg\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;", masked)
+    measurements = list(re.finditer(
+        r"\bmeasure\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*->\s*([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;",
+        masked))
+    if not qregs or not measurements:
+        return source, []
+    quantum_names = {m[1] for m in measurements}
+    classical_names = {m[3] for m in measurements}
+    declared_q = {m[1] for m in qregs}
+    declared_c = {name for name, _ in cregs}
+    undeclared_q = quantum_names - declared_q
+    missing_c = classical_names - declared_c
+    if not undeclared_q and not missing_c:
+        return source, []
+    if len(qregs) != 1 or (undeclared_q and undeclared_q != {"q"}):
+        raise ValueError("Ambiguous undeclared quantum register alias q; "
+                         "multiple quantum registers or unsupported measurement mapping")
+    qname, width_text = qregs[0].group(1, 2)
+    width = int(width_text)
+    prefix = masked[:measurements[0].start()]
+    if undeclared_q and re.search(r"\bq\s*\[", prefix):
+        raise ValueError("Undeclared q register is used outside terminal measurements")
+    # A static top-level body followed exclusively by indexed measurements is
+    # required. Reject conditions, reset, nested bodies and any later operation.
+    if re.search(r"\b(if|reset|measure)\b|[{}]", prefix):
+        raise ValueError("Register repair requires a static terminal measurement suffix")
+    cursor = measurements[0].start()
+    for measurement in measurements:
+        if masked[cursor:measurement.start()].strip():
+            raise ValueError("Register repair requires terminal measurements only")
+        cursor = measurement.end()
+    if masked[cursor:].strip():
+        raise ValueError("Register repair requires terminal measurements only")
+    pairs = [(int(m[2]), int(m[4])) for m in measurements]
+    if sorted(pairs) != [(i, i) for i in range(width)]:
+        raise ValueError("Undeclared q alias has a non-identity or partial measurement map")
+    if quantum_names != ({"q"} if undeclared_q else {qname}):
+        raise ValueError("Register repair requires a single quantum measurement register")
+    if classical_names != {"c"} or (cregs and cregs != [("c", width_text)]):
+        raise ValueError("Register repair requires a single classical register c of matching width")
+    changes, edits = [], []
+    if not cregs:
+        edits.append((qregs[0].end(), qregs[0].end(), "\ncreg c[" + str(width) + "];"))
+        changes.append("inserted creg c[{}]".format(width))
+    if undeclared_q:
+        edits.extend((m.start(1), m.end(1), qname) for m in measurements)
+        changes.append("mapped terminal q[i] measurements to {}[i]".format(qname))
+    normalized = source
+    for start, end, replacement in sorted(edits, reverse=True):
+        normalized = normalized[:start] + replacement + normalized[end:]
+    return normalized, changes
 
 
 def pennylane_compile(path, output):
@@ -129,6 +233,9 @@ def main():
     path, directory = Path(a["input"]), Path(a["directory"])
     output = directory / "compiled.qasm"
     result = {"framework": a["framework"], "status": "failed"}
+    result["thread_environment"] = {key: os.environ.get(key) for key in (
+        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS", "RAYON_NUM_THREADS", "QISKIT_PARALLEL", "QISKIT_NUM_PROCS")}
     # Import framework before timing. The reported time covers the complete
     # parse/compile/export pipeline; startup and verification are separate.
     try:
@@ -167,6 +274,7 @@ def main():
             start = time.perf_counter()
             if framework == "qllvm":
                 command = [a["compiler"], str(path), "-" + a["opt"],
+                           "-mlir-disable-threading",
                            "-emit-backend=qasm-backend", "-output-path=" + str(output),
                            "-basicgate=[" + ",".join(BASIS) + "]"]
                 result["command"] = command
@@ -196,6 +304,16 @@ def main():
             if not output.is_file() or output.stat().st_size == 0:
                 raise RuntimeError("No compiler output")
             result["status"] = "compiled"
+            # Persist compiler completion before output parsing/verification.
+            # A whole-worker timeout must not hide a completed compile, but the
+            # checkpoint alone is not a successful benchmark/verification row.
+            checkpoint = directory / "compile-checkpoint.json"
+            temporary = directory / "compile-checkpoint.json.tmp"
+            temporary.write_text(json.dumps({
+                "status": "compiled", "pipeline_seconds": result["pipeline_seconds"],
+                "output_bytes": output.stat().st_size,
+            }, indent=2) + "\n")
+            temporary.replace(checkpoint)
             try:
                 compiled = load_qasm(output)
                 original = load_qasm(path)
@@ -204,12 +322,14 @@ def main():
                 # Same operator checker for every framework; contracts are never
                 # weakened in response to an optimization failure.
                 from verification import verify
+                from dynamic_qasm import has_feedback
+                semantics = a.get("verification_semantics", "instrument" if has_feedback(original) else "coherent")
                 result["verification"] = verify(original, compiled, a["verify_qubits"],
-                                                  a["tolerance"], "coherent")
+                                                  a["tolerance"], semantics)
                 status = result["verification"]["status"]
                 result["status"] = {"passed": "verified", "not_checked": "compile_only",
                         "unsupported": "compiled_unverified", "failed": "semantic_failed"}[status]
-                unexpected = set(compiled.count_ops()) - set(BASIS) - {"measure", "barrier"}
+                unexpected = set(result["output_metrics"]["operations"]) - set(BASIS) - {"measure", "barrier", "reset"}
                 result["common_basis"] = not unexpected
                 if unexpected:
                     result["basis_note"] = "Native output has gates outside common basis: " + repr(sorted(unexpected))
