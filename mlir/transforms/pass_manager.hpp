@@ -33,6 +33,9 @@
 #include "optimizations/Check_gate.hpp"
 #include "optimizations/InputStatePreambleOptimization.hpp"
 #include "optimizations/turn_to_phasedx.hpp"
+#include "optimizations/utils/round_snapshot.hpp"
+#include <cstdlib>
+#include <optional>
 
 #include <map>
 #include <unordered_map>
@@ -84,6 +87,57 @@ struct PassManagerStats {
   int passes_count[N] = {0};
 };
 
+// Modified 2026-11-21: stop only on an exactly unchanged complete IR state.
+// Large snapshots fall back to the original four rounds. Custom schedules are
+// still executed by the existing path, without convergence decisions.
+struct DefaultOptimizationLoopPass
+    : public PassWrapper<DefaultOptimizationLoopPass, OperationPass<ModuleOp>> {
+  std::unordered_set<std::string> basis;
+  bool trace = false;
+  DefaultOptimizationLoopPass() = default;
+  DefaultOptimizationLoopPass(std::unordered_set<std::string> basis, bool trace)
+      : basis(std::move(basis)), trace(trace) {}
+  void runOnOperation() final {
+    // The fixed schedule remains available for controlled comparisons.
+    const char *fixed = std::getenv("QLLVM_FIXED_OPT_ROUNDS");
+    bool tracking = !(fixed && std::string(fixed) == "1");
+    std::optional<OptimizationRoundSnapshot> before;
+    if (tracking) {
+      before.emplace(getOperation());
+      if (!before->complete) {tracking = false;before.reset();}
+    }
+    for (unsigned round = 0; round < 4; ++round) {
+      OpPassManager pipeline(getOperation()->getName().getStringRef());
+      pipeline.addPass(std::make_unique<RemoveIdentityEquivalent>());
+      pipeline.addPass(std::make_unique<SingleQubitIdentityPairRemovalPass>());
+      pipeline.addPass(std::make_unique<CNOTIdentityPairRemovalPass>());
+      pipeline.addPass(std::make_unique<DuplicateResetRemovalPass>());
+      pipeline.addPass(std::make_unique<remove_diagonal_gates_before_measure>());
+      pipeline.addPass(std::make_unique<CommutativeCancellationPass>());
+      pipeline.addPass(std::make_unique<RemoveIdentityEquivalent>());
+      if (basis.empty()) pipeline.addPass(std::make_unique<ConsolidateBlocks>());
+      else pipeline.addPass(std::make_unique<ConsolidateBlocks>(basis));
+      if (!basis.empty()) pipeline.addPass(std::make_unique<trans_basicgate>(basis));
+      if (basis.empty()) pipeline.addPass(std::make_unique<SingleQubitGateMergingPass>());
+      else pipeline.addPass(std::make_unique<SingleQubitGateMergingPass>(basis));
+      if (failed(runPipeline(pipeline,getOperation()))) {
+        signalPassFailure();return;
+      }
+      bool unchanged = false;
+      if (tracking) {
+        OptimizationRoundSnapshot after(getOperation());
+        unchanged = before->unchanged(after);
+        if (!after.complete) {tracking = false;before.reset();}
+        else before = std::move(after);
+      }
+      if (trace)
+        llvm::errs() << "[qllvm-round] round=" << round+1
+                     << " tracked=" << tracking << " unchanged=" << unchanged << "\n";
+      if (unchanged) break;
+    }
+  }
+};
+
 /// Configure passes for removing unused IR (inliner, loop unroll, SimplifyQubitExtract, RemoveUnusedQIRCalls)
 void configureRemoveUnusedPasses(mlir::PassManager &passManager, const std::string &inputFile);
 
@@ -123,7 +177,6 @@ inline void configureOptimizationPasses(mlir::PassManager &passManager,
 inline void configureOptimizationPasses(mlir::PassManager &passManager,
                                          const PassManagerOptions &opts,
                                          PassManagerStats *outStats) {
-  constexpr int N_REPS = 4;
   int *opt_count = outStats ? outStats->opt_count : nullptr;
   int *opt_depth = outStats ? outStats->opt_depth : nullptr;
   int *zero_count = outStats ? outStats->zero_count : nullptr;
@@ -204,37 +257,8 @@ inline void configureOptimizationPasses(mlir::PassManager &passManager,
     return;
   }
 
-  if (!opts.basicGateSet.empty()) {
-    const auto &basic_gate = opts.basicGateSet;
-    // passManager.addPass(std::make_unique<DecomposemultiPass>());
-    for (int i = 0; i < N_REPS; ++i) {
-      passManager.addPass(std::make_unique<RemoveIdentityEquivalent>());
-      passManager.addPass(std::make_unique<SingleQubitIdentityPairRemovalPass>());
-      passManager.addPass(std::make_unique<CNOTIdentityPairRemovalPass>());
-      passManager.addPass(std::make_unique<DuplicateResetRemovalPass>());
-      passManager.addPass(std::make_unique<remove_diagonal_gates_before_measure>());
-      passManager.addPass(std::make_unique<CommutativeCancellationPass>());
-      passManager.addPass(std::make_unique<RemoveIdentityEquivalent>());
-      passManager.addPass(std::make_unique<ConsolidateBlocks>(basic_gate));
-      passManager.addPass(std::make_unique<trans_basicgate>(basic_gate));
-      passManager.addPass(std::make_unique<SingleQubitGateMergingPass>(basic_gate));
-    }
-    
-  } else {
-    // passManager.addPass(std::make_unique<DecomposemultiPass>());
-    // passManager.addPass(std::make_unique<InputStatePreambleOptimization>());
-    for (int i = 0; i < N_REPS; ++i) {
-      passManager.addPass(std::make_unique<RemoveIdentityEquivalent>());
-      passManager.addPass(std::make_unique<SingleQubitIdentityPairRemovalPass>());
-      passManager.addPass(std::make_unique<CNOTIdentityPairRemovalPass>());
-      passManager.addPass(std::make_unique<DuplicateResetRemovalPass>());
-      passManager.addPass(std::make_unique<remove_diagonal_gates_before_measure>());
-      passManager.addPass(std::make_unique<CommutativeCancellationPass>());
-      passManager.addPass(std::make_unique<RemoveIdentityEquivalent>());
-      passManager.addPass(std::make_unique<ConsolidateBlocks>());
-      passManager.addPass(std::make_unique<SingleQubitGateMergingPass>());
-    }
-  }
+  passManager.addPass(std::make_unique<DefaultOptimizationLoopPass>(
+      opts.basicGateSet,opts.boolArgs.count("round_metrics")));
   passManager.addPass(std::make_unique<RemoveUnusedQIRCallsPass>());
     // passManager.addPass(std::make_unique<InputStatePreambleOptimization>());
 
