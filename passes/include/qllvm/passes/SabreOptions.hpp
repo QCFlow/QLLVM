@@ -28,6 +28,8 @@ struct SabreOptions {
   std::vector<std::pair<int, int>> couplingEdges;
   std::optional<std::vector<int>> initialLayout;
   std::string kernelName;
+  /// Modified 2026-11-20: declaration required by the existing CLI.
+  std::string reportPath;
   std::string heuristic = "basic";
   int maxIterations = 3;
   int layoutTrials = 1;

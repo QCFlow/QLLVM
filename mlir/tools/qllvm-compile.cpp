@@ -18,9 +18,13 @@
  *******************************************************************************/
 
 #include "CompilationPipeline.hpp"
+#include "optimizations/utils/approximation_budget.hpp"
+#include <fstream>
+#include <iomanip>
 #include "qllvm/passes/SabreOptions.hpp"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "mlir/IR/AsmState.h"
@@ -58,6 +62,8 @@ static cl::opt<bool> OptLevelO0("O0", cl::desc("Optimization level 0. Similar to
 static cl::opt<bool> OptLevelO1("O1", cl::desc("Optimization level 1. Similar to clang -O1."));
 static cl::opt<bool> EmitMLIR("emitmlir", cl::desc("Print MLIR"));
 static cl::opt<bool> EmitQIR("emitqir", cl::desc("Print QIR"));
+static cl::opt<bool> TraceTimings("trace-timings",
+    cl::desc("Print elapsed timestamps at compilation stages and optimization pass boundaries"));
 static cl::opt<bool> EmitQASM(
     "emit-qasm", cl::desc("Emit OpenQASM from QIR (alias for -emit-backend=qasm-backend)"));
 static cl::opt<std::string> EmitBackend(
@@ -86,10 +92,23 @@ static cl::opt<bool> mlir_debug_dialect_conversion(
     cl::desc("Debug the execution of the dialect conversion framework."));
 static cl::opt<std::string> sabre_coupling_map(
     "sabre-coupling-map",
-    cl::desc("SABRE coupling map: edges as '0,1;1,2;2,3' (linear chain). Requires -emit-backend=qasm-backend."),
+    cl::desc("SABRE coupling graph: semicolon-separated undirected edges, e.g. '0,1;1,2;2,0'. Requires -emit-backend=qasm-backend."),
     cl::value_desc("edges"));
 
+static cl::opt<double> approximationBudget("approx-budget", cl::desc("Full diamond-distance budget for near-identity deletions"), cl::init(1e-6));
+// Modified November 2026: expose reproducible SABRE search controls.
+static cl::opt<std::string> sabreHeuristic("sabre-heuristic", cl::init("decay"));
+static cl::opt<std::string> sabreReport("sabre-report", cl::init(""));
+static cl::opt<std::string> sabreInitialLayout("sabre-initial-layout", cl::init(""));
+static cl::opt<unsigned> sabreSeed("sabre-seed", cl::init(42));
+static cl::opt<int> sabreLayoutTrials("sabre-layout-trials", cl::init(5));
+static cl::opt<int> sabreSwapTrials("sabre-swap-trials", cl::init(5));
+static cl::opt<int> sabreIterations("sabre-iterations", cl::init(3));
+static cl::opt<bool> exactRotations("exact-rotations", cl::desc("Disable nonzero near-identity deletions"));
+static cl::opt<std::string> approximationReport("approx-report", cl::desc("Write the near-identity deletion budget report as JSON"));
+
 int main(int argc, char** argv) {
+  llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
   mlir::registerPassManagerCLOptions();
@@ -99,15 +118,13 @@ int main(int argc, char** argv) {
   if (mlir_debug_dialect_conversion) {
 #ifndef NDEBUG
     // LLVM's debug helpers are macros/no-ops in optimized builds.
-#ifndef NDEBUG
-    // LLVM's debug helpers are macros/no-ops in optimized builds.
     llvm::DebugFlag = true;
     llvm::setCurrentDebugType("dialect-conversion");
-#endif
 #endif
   }
 
   qllvm::CompilationOptions opts;
+  opts.traceTimings = TraceTimings;
   opts.inputFile = inputFilename.getValue();
   opts.addEntryPoint = !noEntryPoint;
   opts.kernelName = mlir_specified_func_name.getValue();
@@ -165,9 +182,27 @@ int main(int argc, char** argv) {
       }
       i = (sep == std::string::npos) ? s.size() : sep + 1;
     }
-    sabreOpts.layoutTrials = 2;
-    sabreOpts.swapTrials = 1;
-    sabreOpts.seed = 42;
+    if ((sabreHeuristic != "basic" && sabreHeuristic != "lookahead" &&
+         sabreHeuristic != "decay") || sabreLayoutTrials < 1 ||
+         sabreSwapTrials < 1 || sabreIterations < 0) {
+      llvm::errs() << "Invalid SABRE heuristic or trial/iteration count\n";
+      return 1;
+    }
+    sabreOpts.reportPath = sabreReport;
+    if (!sabreInitialLayout.empty()) {
+      std::vector<int> initial;
+      std::stringstream text(sabreInitialLayout.getValue());
+      std::string item;
+      try {
+        while (std::getline(text, item, ',')) initial.push_back(std::stoi(item));
+      } catch (...) { llvm::errs() << "Invalid SABRE initial layout\n"; return 1; }
+      sabreOpts.initialLayout = initial;
+    }
+    sabreOpts.heuristic = sabreHeuristic;
+    sabreOpts.layoutTrials = sabreLayoutTrials;
+    sabreOpts.swapTrials = sabreSwapTrials;
+    sabreOpts.maxIterations = sabreIterations;
+    sabreOpts.seed = sabreSeed;
     opts.sabreOptions = sabreOpts;
   }
 
@@ -181,7 +216,30 @@ int main(int argc, char** argv) {
   if (verbose_error) opts.extraArgs["verbose_error"] = "";
   if (print_final_submission) opts.extraArgs["print_final_submission"] = "";
   
-  qllvm::CompilationResult result = qllvm::runCompilationPipeline(opts);
+  std::ostringstream budgetText;
+  budgetText << std::setprecision(17) << (exactRotations ? 0.0 : approximationBudget.getValue());
+  opts.extraArgs["_qllvm_near_budget"] = budgetText.str();
+  qllvm::CompilationResult result;
+  try {
+    result = qllvm::runCompilationPipeline(opts);
+  } catch (const std::exception &error) {
+    std::cerr << "[qllvm-compile] " << error.what() << std::endl;
+    return 1;
+  }
+
+  if (result.exitCode == 0 && !approximationReport.empty()) {
+    std::ofstream report(approximationReport.getValue());
+    if (!report) { std::cerr << "Cannot write approximation report" << std::endl; return 1; }
+    const auto &budget = qllvm::approximation::current;
+    report << std::setprecision(17)
+           << "{\n  \"scope\": \"intentional near-identity deletions only\",\n"
+           << "  \"full_diamond_convention\": true,\n"
+           << "  \"limit\": " << budget.limit << ",\n"
+           << "  \"charged_upper_bound\": " << budget.spent << ",\n"
+           << "  \"accepted_deletions\": " << budget.deletions << ",\n"
+           << "  \"retained_by_budget\": " << budget.retainedByBudget << ",\n"
+           << "  \"other_pass_roundoff_included\": false\n}\n";
+  }
 
   if (result.exitCode != 0 && !result.errorMessage.empty()) {
     std::cerr << "\033[1m\033[91m" << result.errorMessage << "\033[0m\n";

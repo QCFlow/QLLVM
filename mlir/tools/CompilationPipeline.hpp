@@ -38,6 +38,7 @@ struct CompilationOptions {
   // Output control
   bool emitMLIR = false;
   bool emitQIR = false;
+  bool traceTimings = false; // Emit progress timestamps, including unfinished passes.
   std::string emitBackend;   // e.g. "qasm-backend"
   std::string outputPath;    // for backend emit
   std::string outputLlPath;  // for .ll file (default: stem + ".ll")

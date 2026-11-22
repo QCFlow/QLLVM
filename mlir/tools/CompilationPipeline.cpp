@@ -17,6 +17,7 @@
  *******************************************************************************/
 
 #include "CompilationPipeline.hpp"
+#include "optimizations/utils/approximation_budget.hpp"
 
 #include "Quantum/QuantumDialect.h"
 #include "llvm/Support/Path.h"
@@ -45,10 +46,38 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <chrono>
+#include <mutex>
 
 namespace qllvm {
 
 namespace {
+
+// Modified 2026-11-19: emit boundaries immediately, so a timeout still leaves
+// evidence of the active stage. No IR dumps or program contents are logged.
+class ProgressTiming : public mlir::PassInstrumentation {
+public:
+  using Clock = std::chrono::steady_clock;
+  explicit ProgressTiming(Clock::time_point start) : start(start) {}
+  void runBeforePass(mlir::Pass *pass, mlir::Operation *) override {
+    mark("pass-start", pass->getName());
+  }
+  void runAfterPass(mlir::Pass *pass, mlir::Operation *) override {
+    mark("pass-end", pass->getName());
+  }
+  void runAfterPassFailed(mlir::Pass *pass, mlir::Operation *) override {
+    mark("pass-failed", pass->getName());
+  }
+  void mark(llvm::StringRef event, llvm::StringRef name) {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::cerr << "[qllvm-timing] "
+              << std::chrono::duration<double>(Clock::now() - start).count()
+              << "s " << event.str() << " " << name.str() << std::endl;
+  }
+private:
+  Clock::time_point start;
+  std::mutex mutex;
+};
 
 constexpr const char* BOLD = "\033[1m";
 constexpr const char* RED = "\033[91m";
@@ -70,6 +99,7 @@ std::map<std::string, bool> buildBoolArgs(const CompilationOptions& opts) {
   if (opts.randomSeq) m["random_seq"] = true;
   if (opts.customPassSequenceFile) m["customPassSequence"] = true;
   if (opts.basicGateSet) m["basicgate"] = true;
+  if (opts.traceTimings) m["round_metrics"] = true;
   return m;
 }
 
@@ -140,9 +170,22 @@ void printPassCountStats(int passes_count[20]) {
 
 CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   CompilationResult result;
+  const auto timingStart = ProgressTiming::Clock::now();
+  ProgressTiming progress(timingStart);
+  auto mark = [&](llvm::StringRef stage) {
+    if (opts.traceTimings) progress.mark("stage", stage);
+  };
+  mark("frontend-start");
 
+  auto frontendArgs = opts.extraArgs;
+  if (opts.traceTimings) frontendArgs["_qllvm_trace_frontend"] = "1";
+  auto budgetOption = frontendArgs.find("_qllvm_near_budget");
+  const double nearBudget = budgetOption == frontendArgs.end() ? 1e-6 : std::stod(budgetOption->second);
+  frontendArgs.erase("_qllvm_near_budget");
+  qllvm::approximation::reset(nearBudget);
   auto mlir_gen_result = qllvm::util::mlir_gen(
-      opts.inputFile, opts.addEntryPoint, opts.kernelName, opts.extraArgs);
+      opts.inputFile, opts.addEntryPoint, opts.kernelName, frontendArgs);
+  mark("frontend-end");
 
   mlir::OwningModuleRef& module = *(mlir_gen_result.module_ref);
   mlir::MLIRContext& context = *(mlir_gen_result.mlir_context);
@@ -153,7 +196,10 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   // module->dump();
   // Delete unused MLIR functions
   mlir::PassManager pm_delete(&context);
+  mark("cleanup-start");
   qllvm::configureRemoveUnusedPasses(pm_delete, opts.inputFile);
+  if (opts.traceTimings)
+    pm_delete.addInstrumentation(std::make_unique<ProgressTiming>(timingStart));
   if (mlir::failed(pm_delete.run((*module).getOperation()))) {
     result.exitCode = 1;
     result.errorMessage = "[qllvm-compile] Delete unused IR failed.";
@@ -161,8 +207,11 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   }
 
   // Optimization passes
+  mark("cleanup-end");
   mlir::PassManager pm(&context);
   mlir::applyPassManagerCLOptions(pm);
+  if (opts.traceTimings)
+    pm.addInstrumentation(std::make_unique<ProgressTiming>(timingStart));
 
   qllvm::PassManagerOptions pmOpts;
   pmOpts.inputFile = fname;
@@ -200,8 +249,21 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
         return result;
       }
       std::string buf;
-      while (std::getline(infile, buf)) pmOpts.customPassSequence.push_back(std::atoi(buf.c_str()));
+      while (std::getline(infile, buf)) {
+        if (buf.find_first_not_of(" \t\r") == std::string::npos) continue;
+        size_t consumed = 0;
+        int pass = std::stoi(buf, &consumed);
+        if (pass < 0 || pass > 10 || buf.find_first_not_of(" \t\r", consumed) != std::string::npos) {
+          result.exitCode = 1;
+          result.errorMessage = "Invalid custom pass identifier: " + buf;
+          return result;
+        }
+        pmOpts.customPassSequence.push_back(pass);
+      }
       qllvm::configureOptimizationPasses(pm, pmOpts, &pmStats);
+      // Custom ordering changes the optimization schedule, not the target alphabet.
+      if (!pmOpts.basicGateSet.empty())
+        pm.addPass(std::make_unique<qllvm::trans_basicgate>(pmOpts.basicGateSet));
     } else if (opts.synOpt || opts.randomSeq) {
       pmOpts.customPassSequence = getPassSequence(pmOpts.boolArgs);
       qllvm::configureOptimizationPasses(pm, pmOpts, &pmStats);
@@ -233,6 +295,7 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     result.errorMessage = "[qllvm-compile] MLIR optimization failed.";
     return result;
   }
+  mark("optimization-end");
   
 
   if (opts.emitMLIR) {
@@ -246,6 +309,7 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
 
   // Lower to LLVM MLIR
   mlir::PassManager pm_llvm(&context);
+  mark("lowering-start");
   pm_llvm.addPass(std::make_unique<qllvm::ModifierRegionRewritePass>());
   pm_llvm.addPass(std::make_unique<qllvm::QuantumToLLVMLoweringPass>(
       opts.qOptimizations, unique_function_names));
@@ -277,6 +341,7 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   // MLIR -> LLVM IR
   llvm::LLVMContext llvmContext;
   auto llvmModule = mlir::translateModuleToLLVMIR(*module, llvmContext);
+  mark("translation-end");
   if (!llvmModule) {
     result.exitCode = -1;
     result.errorMessage = "[qllvm-compile] MLIR-to-LLVM-IR lowering failed.";
@@ -291,7 +356,10 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   // CircuitExtractor/Sabre assume and makes mapped output non-equivalent.
   const bool sabreEnabled =
       opts.sabreOptions.has_value() && opts.sabreOptions->enabled();
-  if (!sabreEnabled) {
+  // QASM export observes classical stores/CFG that LLVM DCE may erase.
+  // Retain this representation; O1 quantum MLIR transformations remain active.
+  const bool preserveExportDataflow = opts.emitBackend == "qasm-backend";
+  if (!sabreEnabled && !preserveExportDataflow) {
     auto optPipeline = mlir::makeOptimizingTransformer(optLevel, 0, nullptr);
     if (auto err = optPipeline(llvmModule.get())) {
       result.exitCode = -1;
@@ -344,11 +412,13 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     beOpts.outputPath = outPath;
     beOpts.kernelName = kernelName;
     beOpts.format = "openqasm2";
+    mark("backend-start");
     if (!backend->emit(llvmModule.get(), beOpts)) {
       result.exitCode = 1;
       result.errorMessage = "[qllvm-compile] Backend " + opts.emitBackend + " emit failed.";
       return result;
     }
+    mark("backend-end");
     return result;
   }
 
