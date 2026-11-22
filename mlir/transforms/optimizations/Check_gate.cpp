@@ -49,6 +49,9 @@ void Check_gate::getDependentDialects(DialectRegistry &registry) const {
 
 void Check_gate::runOnOperation() {
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
+    // Modified 2026-11-21: reset is a non-unitary primitive. O0 gate
+    // validation must not request a unitary matrix for this operation.
+    if (op.name() == "reset") return;
     auto mat = qllvm::matrix::getGateMat(op,0);
   });
 

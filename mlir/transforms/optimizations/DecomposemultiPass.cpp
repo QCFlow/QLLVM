@@ -3460,7 +3460,7 @@ void DecomposemultiPass::runOnOperation() {
   //  std::cout << "DecomposemultiPass: " << std::endl;
   // gen_qasm(getOperation(),"before.qasm");
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
-  std::unordered_set<std::string> gate_set = {"u3","rx","ry","rz","x","y","z","cx","cy","cz","h","sdg","tdg","s","sx","p","cp","t","swap"};
+  std::unordered_set<std::string> gate_set = {"u3","rx","ry","rz","x","y","z","cx","cy","cz","h","sdg","tdg","s","sx","p","cp","t","swap","reset"};
   std::unordered_set<std::string> gate_to_decompose = {"u1","u2","u0","u","sxdg","ch","cy","cu3","cu1","cu","csx","ccx","cswap","crx","cry","crz","rxx","rzz","ryy","rccx","rc3x","c3x","c3sqrtx","c4x","cpx","cxz","mcx","mcp","mcrx","mcry","mcrz","dcx","rzx","ecr","ccz","r","cs","iswap","csdg","ms","rxy","X2P","X2M","Y2P","Y2M","XY2P","XY2M"};
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
   

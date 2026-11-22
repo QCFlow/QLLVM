@@ -1324,6 +1324,8 @@ void trans_swap(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantu
 
 void trans_to_basic(mlir::quantum::ValueSemanticsInstOp &op,std::vector<mlir::quantum::ValueSemanticsInstOp> &dead_ops){
     std::string op_name = op.name().str();
+    // Reset is a non-unitary primitive, not a gate-basis decomposition target.
+    if (op_name == "reset") return;
     if(op_name == "x"){
         trans_x(op,dead_ops);
     }else if(op_name == "y"){
@@ -1368,6 +1370,9 @@ void trans_basicgate::runOnOperation(){
     basic_gate_set = basic_gate;
     getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
         auto op_name = op.name().str();
+        // Reset is a non-unitary primitive and remains in the target output;
+        // it is never a member of the unitary basis rewrite set.
+        if (op_name == "reset") return;
         
         if(basic_gate_set.find(op_name) == basic_gate_set.end()){
             gate_to_trans.emplace_back(op);
