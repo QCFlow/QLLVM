@@ -27,6 +27,8 @@
 #include <iomanip> 
 #include "utils/circuit.hpp"
 #include "utils/op.hpp"
+#include "llvm/ADT/DenseSet.h"
+#include <unordered_map>
 
 namespace qllvm {
 void SingleQubitGateMergingPass::getDependentDialects(
@@ -57,10 +59,19 @@ void SingleQubitGateMergingPass::runOnOperation() {
   }
   // Walk the operations within the function.
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
+  // Modified 2026-11-19: keep deletion order, but test membership in O(1).
+  // Scanning all previously merged gates for each new operation is quadratic.
+  llvm::DenseSet<mlir::Operation *> deadSet;
+  // Modified 2026-11-21: repeat sequences (including their exact angle bits)
+  // often recur on different wires. Cache synthesis, never quantum values.
+  std::unordered_map<std::string, std::vector<qllvm::utils::qop_t>> synthesisCache;
+  size_t cachedKeyBytes = 0;
   std::vector<std::string> unableOps = {"mz","reset","u1","u2","p","u"};
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
+    // Preserve sub-block phase until coherent-control lowering is complete.
+    if (op->getParentOfType<mlir::quantum::CtrlURegion>()) return;
     auto inst_name = op.name();
-    if (std::find(deadOps.begin(), deadOps.end(), op) != deadOps.end()) {
+    if (deadSet.count(op.getOperation())) {
       // Skip this op since it was merged (forward search)
       return;
     }
@@ -138,7 +149,25 @@ void SingleQubitGateMergingPass::runOnOperation() {
         ops.emplace_back(
             std::make_pair(ops_list[i].name().str(), op_params[i]));
       }
-      const auto simplified_seq = qllvm::utils::new_euler_decompose(ops,basicgateset);
+      std::string key;
+      for (const auto &gate : ops) {
+        key.append(gate.first); key.push_back('\0');
+        const size_t count = gate.second.size();
+        key.append(reinterpret_cast<const char *>(&count), sizeof(count));
+        for (double angle : gate.second)
+          key.append(reinterpret_cast<const char *>(&angle), sizeof(angle));
+      }
+      auto cached = synthesisCache.find(key);
+      std::vector<qllvm::utils::qop_t> simplified_seq;
+      if (cached != synthesisCache.end()) simplified_seq = cached->second;
+      else {
+        simplified_seq = qllvm::utils::new_euler_decompose(ops,basicgateset);
+        if (synthesisCache.size() < 4096 && key.size() <= 4096 &&
+            cachedKeyBytes + key.size() <= 4 * 1024 * 1024) {
+          cachedKeyBytes += key.size();
+          synthesisCache.emplace(std::move(key), simplified_seq);
+        }
+      }
       
       if (simplified_seq.size() < ops_list.size()) {
         rewriter.setInsertionPointAfter(ops_list.back());
@@ -181,7 +210,8 @@ void SingleQubitGateMergingPass::runOnOperation() {
 
         // Erase original instructions:
         for (auto &op_to_delete : ops_list) {
-          deadOps.emplace_back(op_to_delete);
+          if (deadSet.insert(op_to_delete.getOperation()).second)
+            deadOps.emplace_back(op_to_delete);
         }
         
       }
@@ -219,4 +249,3 @@ void SingleQubitGateMergingPass::runOnOperation() {
   }
 }
 } // namespace qllvm
-

@@ -25,13 +25,16 @@
 #include <Eigen/Dense>
 #include <eigen3/unsupported/Eigen/KroneckerProduct>
 #include <eigen3/unsupported/Eigen/MatrixFunctions>
+#include "llvm/ADT/DenseSet.h"
 
 
 using namespace mlir;
 
 namespace qllvm {
 using pauli_decomp_t = std::pair<std::string, double>;
-  void find_runs(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_run,mlir::quantum::ValueSemanticsInstOp op,int owner_or_user);
+  void find_runs(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_run,
+                 mlir::quantum::ValueSemanticsInstOp op,int owner_or_user,
+                 llvm::DenseSet<mlir::Operation *> *visited = nullptr);
   Eigen::MatrixXcd totalMat(std::vector<mlir::quantum::ValueSemanticsInstOp> &blocks);
 struct ConsolidateBlocks
     : public PassWrapper<ConsolidateBlocks, OperationPass<ModuleOp>> {

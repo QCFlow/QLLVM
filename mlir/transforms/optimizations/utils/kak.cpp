@@ -11,6 +11,11 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+// Modified 2026-11-22: exact Weyl reconstruction, explicit tensor order and numerical guards.
+#include "get_matrix.hpp"
+#include "local_unitary.hpp"
+#include "synthesis_diagnostics.hpp"
+#include "weyl_diagonalization.hpp"
 #include <Eigen/Dense>
 #include <complex>
 #include <cmath>
@@ -22,7 +27,9 @@
 #include "gate_matrix.hpp"
 
 #define _USE_MATH_DEFINES
-double TOLERANCE = 1e-15;
+constexpr double TOLERANCE = 1e-15;
+constexpr double INPUT_UNITARY_TOLERANCE = 1e-10;
+constexpr double WEYL_DIAGONALIZATION_TOLERANCE = 1e-12;
 std::unordered_set<std::string> basic_gate_set;
 
 using namespace Eigen;
@@ -62,8 +69,9 @@ bool is_close(double a, double b, double c, double ap, double bp, double cp, dou
         sin(da) * sin(db) * sin(dc)
     );
 
-    // convert to fid
-    double fid = trace_to_fid(tr);
+    // The trigonometric product is the trace divided by four. Qiskit's
+    // average-gate fidelity uses the full trace, whose maximum is 4.
+    double fid = trace_to_fid(std::complex<double>(4.0, 0.0) * tr);
 
     // check if it is greater than or equal to the threshold
     return fid >= fidelity;
@@ -257,15 +265,17 @@ Eigen::Matrix4cd compute_exp_diagonal_matrix(const Eigen::Vector4d& d) {
   return D;
 }
 
-decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix,double fidelity=(1.0 - 1.0e-9)) {
+decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix) {
   
   Eigen::Matrix4cd U = unitary_matrix;
   for(int i = 0;i < 4;i++){
     for(int j = 0;j < 4;j++){
-      if(U(i,j).real() < TOLERANCE){
+      // Compare the magnitude. A signed comparison zeros every negative entry
+      // and makes the Weyl decomposition fail on ordinary rotations.
+      if(std::abs(U(i,j).real()) < TOLERANCE){
         U(i,j).real(0.0);
       }
-      if(U(i,j).imag() < TOLERANCE){
+      if(std::abs(U(i,j).imag()) < TOLERANCE){
         U(i,j).imag(0.0);
       }
     }
@@ -298,34 +308,10 @@ decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix,double 
 
   Eigen::Matrix4d P;
   Eigen::Vector4cd D;
-  bool diagonalized = false;
-  
-  // initialize the random number generator
-  mt19937_64 rng(2020);
-  normal_distribution<double> dist(0.0, 1.0);
-  
-  for (int attempt = 0; attempt < 100; ++attempt) {
-    // create the real number perturbation of M2
-    Matrix4d M2real = Eigen::Matrix4d::Zero();
-    for (int i = 0; i < 4; ++i) {
-      for (int j = 0; j < 4; ++j) {
-          double rand1 = dist(rng);
-          double rand2 = dist(rng);
-          M2real(i, j) = rand1 * M2.real()(i, j) + rand2 * M2.imag()(i, j);
-      }
-    }
-    // calculate the feature decomposition
-    
-    SelfAdjointEigenSolver<Matrix4d> solver(M2real);
-    P = solver.eigenvectors();
-    D = (P.transpose() * M2 * P).diagonal();
-    // check if the diagonalization is successful
-    auto reconstructed = P * D.asDiagonal() * P.transpose();
-    if(allClose(reconstructed,M2)){
-      diagonalized = true;
-      break;
-    }
-  }
+  // Modified 2026-11-21: common scalar weights preserve the simultaneous
+  // eigenbasis; elementwise random weights caused unnecessary failed retries.
+  const bool diagonalized =
+      qllvm::kak::diagonalizeSymmetricUnitary(M2, P, D, WEYL_DIAGONALIZATION_TOLERANCE);
   
   if(!diagonalized) {
     // std::cout << "TwoQubitWeylDecomposition: failed to diagonalize M2" << std::endl;
@@ -363,11 +349,15 @@ decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix,double 
   }
 
   // get the sorted index
-  vector<int> indices = {1,2,0};
+  vector<int> indices = {0,1,2};
   sort(indices.begin(), indices.end(), [&cstemp](int a, int b) {
       return cstemp(a) < cstemp(b);
   });
   
+  // Arrange sorted coordinates as middle/largest/smallest before the
+  // Weyl reflections. Sorting {1,2,0} itself loses this permutation.
+  indices = {indices[1], indices[2], indices[0]};
+
   // apply the sorted index
   Eigen::Vector3d cs_ordered = cs;
   Eigen::Vector4d d_ordered = d;
@@ -433,8 +423,8 @@ decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix,double 
   DecompositionResult result_2 = decompose_two_qubit_product_gate(K2);
   auto K2l = result_2.L;
   auto K2r = result_2.R;
-  auto phase_r = result_1.phase;
-  if(K2l == Eigen::Matrix2cd::Zero() && K2l== Eigen::Matrix2cd::Zero() && phase_r == 0.0){
+  auto phase_r = result_2.phase;
+  if(K2l == Eigen::Matrix2cd::Zero() && K2r== Eigen::Matrix2cd::Zero() && phase_r == 0.0){
     decompose_site result;
     result.L1 = Eigen::Matrix2cd::Zero();
     result.L2 = Eigen::Matrix2cd::Zero();
@@ -513,168 +503,9 @@ decompose_site weyl_decomposition(const Eigen::Matrix4cd& unitary_matrix,double 
   auto a = cs[1];
   auto b = cs[0];
   auto c = cs[2];
-  auto x1 = closest_partial_swap(a, b, c);
-  auto x2 = closest_partial_swap(a, b, -c);
-  if(!fidelity){
-
-    decompose_site result;
-    result.L1 = K1l;
-    result.L2 = K1r;
-    result.R1 = K2l;
-    result.R2 = K2r;
-    result.a = a;
-    result.b = b;
-    result.c = c;
-    result.g = global_phase;
-    return result;
-  }
-
-  if (is_close(a,b,c,0, 0, 0)){
-
-      a = b = c = 0.0;
-      K1l = K1l * K2l;
-      K1r = K1r * K2r;
-      K2l = i_d();
-      K2r = i_d();
-  }else if(is_close(a,b,c,M_PI_4, M_PI_4, M_PI_4) || is_close(a,b,c,M_PI_4, M_PI_4, -M_PI_4)){
-      if(c > 0){
-          K1l = K1l* K2r;
-          K1r = K1r * K2l;
-      }else{
-          K1l = K1l * ip_z() * K2r;
-          K1r = K1r * ip_z() * K2l;
-          global_phase += M_PI_2;
-      }
-      a = b = c = M_PI_4;
-  }else if(is_close(a, b, c, x1, x1, x1)){
-
-      a = b = c = x1;
-      K1l = K1l * K2l;
-      K1r = K1r * K2l;
-      K2r = K2l.adjoint() * K2r;
-      K2l = i_d();
-  }else if(is_close(a, b, c, x2, x2, -x2)){
-    
-    a = b = x2;
-    c = -a;
-    K1l = K1l * K2l;
-    K1r = K1r * ip_z() * K2l * ip_z();
-    K2r = ip_z() * K2l.adjoint() * ip_z() * K2r;
-    K2l = i_d();
-  }else if(is_close(a, b, c, (a+b)/2, (a+b)/2, c)){
-
-    a = b = (a+b)/2;
-    // auto [k2lphase, k2lphi_t, k2ltheta_t, k2llambda_t] = qllvm::utils::singlegatedecompose(K2l);
-    auto pras_k2l = qllvm::utils::paramsxyxinner(K2l);
-    auto k2ltheta_t = pras_k2l[0];
-    auto k2lphi_t = pras_k2l[1];
-    auto k2llambda_t = pras_k2l[2];
-    auto k2lphase = pras_k2l[3];
-
-    global_phase += k2lphase;
-    auto k2lphi = 2 * k2lphi_t;
-    auto k2ltheta = 2 * k2ltheta_t;
-    auto k2llambda = 2 * k2llambda_t;
-    auto k2lphi_1 = -1 * k2lphi_t;
-
-    K1r = K1r * rz_mat(k2lphi);
-    K1l = K1l * rz_mat(k2lphi);
-    K2l = ry_mat(k2ltheta) * rz_mat(k2llambda);
-    K2r = rz_mat(k2lphi_1) * K2r;
-
-  }else if(is_close(a, b, c, M_PI_4, M_PI_4, c)){
-
-    a = b = M_PI_4;
-    // auto [k2lphase, k2lphi_t, k2ltheta_t, k2llambda_t] = qllvm::utils::singlegatedecompose(K2l);
-    // auto [k2rphase, k2rphi_t, k2rtheta_t, k2rlambda_t] = qllvm::utils::singlegatedecompose(K2r);
-
-    auto pras_k2l = qllvm::utils::paramszyzinner(K2l);
-    auto pras_k2r = qllvm::utils::paramszyzinner(K2r);
-
-    auto k2ltheta = pras_k2l[0];
-    auto k2lphi = pras_k2l[1];
-    auto k2llambda = pras_k2l[2];
-    auto k2lphase = pras_k2l[3];
-
-    auto k2rtheta = pras_k2r[0];
-    auto k2rphi = pras_k2r[1];
-    auto k2rlambda = pras_k2r[2];
-    auto k2rphase = pras_k2r[3];
-    
-    global_phase += k2lphase + k2rphase;
-    k2lphi *= 2;
-    k2ltheta *= 2;
-    k2llambda *= 2;
-
-    k2rphi *= 2;
-    k2rtheta *= 2;
-    k2rlambda *= 2;
-
-    K1r = K1r * rz_mat(k2lphi);
-    K1l = K1l * rx_mat(k2rphi);
-    K2l = ry_mat(k2ltheta) * rz_mat(k2llambda);
-    K2r = ry_mat(k2rtheta) * rz_mat(k2rlambda);
-  }else if(is_close(a, b, c, a, (b-c)/2, (c-b)/2)){
-
-    b = (b-c)/2;
-    c = (c-b)/2;
-    // auto [k2lphase, k2lphi_t, k2ltheta_t, k2llambda_t] = qllvm::utils::singlegatedecompose(K2l);
-    // auto [k2lphi, k2ltheta, k2llambda] = qllvm::xyx::zyz_to_xyx(2*k2lphi_t, 2*k2ltheta_t, 2*k2llambda_t);
-    auto pras_k2l = qllvm::utils::paramsxyxinner(K2l);
-    auto k2ltheta = pras_k2l[0];
-    auto k2lphi = pras_k2l[1];
-    auto k2llambda = pras_k2l[2];
-    auto k2lphase = pras_k2l[3];
-
-    global_phase += k2lphase;
-    K1r = K1r * ip_z() * rx_mat(k2lphi) * ip_z();
-    K1l = K1l * rx_mat(k2lphi);
-    K2l = ry_mat(k2ltheta) * rx_mat(k2llambda);
-    auto k2lphi_1 = -1 * k2lphi;
-    K2r = ip_z() * rx_mat(k2lphi_1) * ip_z() * K2r;
-  }else if(is_close(a, b, c, a, (b+c)/2, (b+c)/2)){
-
-    b = c = (b+c)/2;
-    // auto [k2lphase, k2lphi_t, k2ltheta_t, k2llambda_t] = qllvm::utils::singlegatedecompose(K2l);
-    // auto [k2lphi, k2ltheta, k2llambda] = qllvm::xyx::zyz_to_xyx(2*k2lphi_t, 2*k2ltheta_t, 2*k2llambda_t);
-    auto pras_k2l = qllvm::utils::paramsxyxinner(K2l);
-    auto k2ltheta = pras_k2l[0];
-    auto k2lphi = pras_k2l[1];
-    auto k2llambda = pras_k2l[2];
-    auto k2lphase = pras_k2l[3];
-
-    global_phase += k2lphase;
-    K1r = K1r * rx_mat(k2lphi);
-    K1l = K1l * rx_mat(k2lphi);
-    K2l = ry_mat(k2ltheta) * rx_mat(k2llambda);
-    auto k2lphi_1 = -1 * k2lphi;
-
-    K2r = rx_mat(k2lphi_1) * K2r;
-  }else if(is_close(a, b, c, a, 0, 0)){
-    b = c = 0;
-    // auto [k2lphase, k2lphi_t, k2ltheta_t, k2llambda_t] = qllvm::utils::singlegatedecompose(K2l);
-    // auto [k2rphase, k2rphi_t, k2rtheta_t, k2rlambda_t] = qllvm::utils::singlegatedecompose(K2r);
-    // auto [k2lphi, k2ltheta, k2llambda] = qllvm::xyx::zyz_to_xyx(2*k2lphi_t, 2*k2ltheta_t, 2*k2llambda_t);
-    // auto [k2rphi, k2rtheta, k2rlambda] = qllvm::xyx::zyz_to_xyx(2*k2rphi_t, 2*k2rtheta_t, 2*k2rlambda_t);
-    auto pras_k2l = qllvm::utils::paramsxyxinner(K2l);
-    auto pras_k2r = qllvm::utils::paramsxyxinner(K2r);
-
-    auto k2ltheta = pras_k2l[0];
-    auto k2lphi = pras_k2l[1];
-    auto k2llambda = pras_k2l[2];
-    auto k2lphase = pras_k2l[3];
-
-    auto k2rtheta = pras_k2r[0];
-    auto k2rphi = pras_k2r[1];
-    auto k2rlambda = pras_k2r[2];
-    auto k2rphase = pras_k2r[3];
-
-    global_phase += k2lphase + k2rphase;
-    K1l = K1l * rx_mat(k2lphi);
-    K1r = K1r * rx_mat(k2rphi);
-    K2l = ry_mat(k2ltheta) * rx_mat(k2llambda);
-    K2r = rx_mat(k2rtheta) * rx_mat(k2rlambda);
-  }
+  // Keep the exact Weyl coordinates. Specializing near-degenerate cases by
+  // average fidelity can exceed the final operator residual and must not
+  // silently approximate a block outside the circuit's error budget.
 
   decompose_site result;
   result.L1 = K1l;
@@ -701,7 +532,7 @@ bool isUnitary(const Eigen::MatrixXcd &in_mat) {
   Eigen::MatrixXcd Id =
       Eigen::MatrixXcd::Identity(in_mat.rows(), in_mat.cols());
 
-  return allClose(in_mat * in_mat.adjoint(), Id);
+  return allClose(in_mat * in_mat.adjoint(), Id, INPUT_UNITARY_TOLERANCE);
 }
 
 // Compute exp(i(x XX + y YY + z ZZ)) matrix
@@ -769,17 +600,84 @@ void mergeVectors(std::vector<qllvm::kak::TMP_OP> &vec1, std::vector<qllvm::kak:
 
 std::vector<qllvm::kak::TMP_OP> KAK::expand(Eigen::Matrix4cd unitary, std::vector<size_t> bits,std::unordered_set<std::string>  basic_gate_set) {
   if (!isUnitary(unitary)) {
+    if (synthesis::allowDiagnostic()) std::cerr << "expand: input not unitary\n";
     std::vector<qllvm::kak::TMP_OP> tmp;
     return tmp;
   }
   auto result = kakDecomposition(unitary);
   if (!result.has_value()) {
+    if (synthesis::allowDiagnostic()) std::cerr << "expand: kak decomposition failed\n";
     std::vector<qllvm::kak::TMP_OP> tmp;
     return tmp;
   }
   
+  if (!qllvm::matrix::sameLocalUnitary(unitary, result->toMat())) {
+    // The candidate permutations below only explain a rejected decomposition.
+    // Retain rejection and its original checks even when diagnostics are off.
+    if (synthesis::allowDiagnostic()) {
+      auto aligned = [](const Eigen::MatrixXcd &reference,
+                        const Eigen::MatrixXcd &candidate) {
+        const std::complex<double> overlap =
+            (reference.adjoint() * candidate).trace();
+        if (std::abs(overlap) < 1e-15) return candidate.norm();
+        const std::complex<double> phase = overlap / std::abs(overlap);
+        return (candidate - phase * reference).norm();
+      };
+      const double angles[6][3] = {
+          {result->x, result->y, result->z}, {result->x, result->z, result->y},
+          {result->y, result->x, result->z}, {result->y, result->z, result->x},
+          {result->z, result->x, result->y}, {result->z, result->y, result->x}};
+      double best = 1e9;
+      int bestCase = -1;
+      for (int order = 0; order < 2; ++order) {
+        auto before = order == 0 ? Eigen::kroneckerProduct(result->b1, result->b0)
+                                 : Eigen::kroneckerProduct(result->b0, result->b1);
+        auto after = order == 0 ? Eigen::kroneckerProduct(result->a1, result->a0)
+                                : Eigen::kroneckerProduct(result->a0, result->a1);
+        for (int perm = 0; perm < 6; ++perm) {
+          auto candidate = result->g * after *
+                           interactionMatrixExp(angles[perm][0], angles[perm][1],
+                                                angles[perm][2]) *
+                           before;
+          double distance = aligned(unitary, candidate);
+          if (distance < best) {
+            best = distance;
+            bestCase = order * 6 + perm;
+          }
+        }
+      }
+      std::cerr << "expand: reconstructed matrix mismatch x=" << result->x
+                << " y=" << result->y << " z=" << result->z
+                << " best=" << best << " case=" << bestCase << "\n";
+    }
+    return {};
+  }
   auto gates = result->toGates(bits[0], bits[1],basic_gate_set);
-
+  try {
+    Eigen::MatrixXcd candidate = Eigen::MatrixXcd::Identity(4, 4);
+    for (const auto &gate : gates) {
+      std::vector<size_t> axes;
+      for (int operand : gate.indexs) {
+        auto it = std::find(bits.begin(), bits.end(), size_t(operand));
+        if (it == bits.end()) {
+          if (synthesis::allowDiagnostic()) std::cerr << "expand: operand outside the block\n";
+          return {};
+        }
+        axes.push_back(std::distance(bits.begin(), it));
+      }
+      auto local = qllvm::matrix::getGateMat({gate.name, gate.params}, 0);
+      candidate = qllvm::matrix::embedLocalUnitary(local, axes, 2) * candidate;
+    }
+    if (!qllvm::matrix::sameLocalUnitary(unitary, candidate)) {
+      if (synthesis::allowDiagnostic()) std::cerr << "expand: gate sequence mismatch gates=" << gates.size()
+                << " x=" << result->x << " y=" << result->y
+                << " z=" << result->z << "\n";
+      return {};
+    }
+  } catch (const std::exception &error) {
+    if (synthesis::allowDiagnostic()) std::cerr << "expand: " << error.what() << "\n";
+    return {};
+  }
   return gates;
 }
 
@@ -787,12 +685,12 @@ std::optional<KAK::KakDecomposition>
 KAK::kakDecomposition(const InputMatrix& in_matrix) const {
   auto wel_site = weyl_decomposition(in_matrix);
 
-  auto a0 = wel_site.L1;
-  auto a1 = wel_site.L2;
-  auto b0 = wel_site.R1;
-  auto b1 = wel_site.R2;
-  auto x = wel_site.b;
-  auto y = wel_site.a;
+  auto a0 = wel_site.L2;
+  auto a1 = wel_site.L1;
+  auto b0 = wel_site.R2;
+  auto b1 = wel_site.R1;
+  auto x = wel_site.a;
+  auto y = wel_site.b;
   auto z = wel_site.c;
   auto g = wel_site.g;
 
@@ -812,7 +710,7 @@ KAK::kakDecomposition(const InputMatrix& in_matrix) const {
     result.x = x;
     result.y = y;
     result.z = z;
-    result.g = g;
+    result.g = std::polar(1.0, g);
   }
   return result;
 }
@@ -829,7 +727,22 @@ std::vector<qllvm::kak::TMP_OP>
 KAK::KakDecomposition::toGates(size_t in_bit1, size_t in_bit2,std::unordered_set<std::string>  basic_gate_set) const {
 
   const auto generateInteractionComposite = [&](size_t bit1, size_t bit2, double x, double y, double z) {
-    const double TOL = 1e-8;
+    const double TOL = 1e-12;
+    // A vanishing interaction is local gates only. Emitting two CZ plus a
+    // zero rotation here is what turned cancelling pairs back into entanglers.
+    if (std::abs(x) < TOL && std::abs(y) < TOL && std::abs(z) < TOL)
+      return std::vector<qllvm::kak::TMP_OP>{};
+    // Modified 2026-11-22: the Weyl point (pi/4,0,0) is the one-CZ
+    // class. H.H conjugates ZZ into XX; local -pi/2 Z rotations turn
+    // CZ into exp(i*pi/4*ZZ), up to global phase. Other Ising angles
+    // still need two CZs. The complete emitted sequence is validated below.
+    if (std::abs(x - M_PI_4) < TOL && std::abs(y) < TOL && std::abs(z) < TOL) {
+      return std::vector<qllvm::kak::TMP_OP>{
+          {"h", {}, {int(bit1)}}, {"h", {}, {int(bit2)}},
+          {"rz", {-M_PI_2}, {int(bit1)}}, {"rz", {-M_PI_2}, {int(bit2)}},
+          {"cz", {}, {int(bit1), int(bit2)}},
+          {"h", {}, {int(bit1)}}, {"h", {}, {int(bit2)}}};
+    }
     // Full decomposition is required
     if (std::abs(z) >= TOL) {
       const double xAngle = M_PI * (x * -2 / M_PI + 0.5);
@@ -913,13 +826,13 @@ KAK::KakDecomposition::toGates(size_t in_bit1, size_t in_bit2,std::unordered_set
     }
   };
 
-  auto a0Comp = singleQubitGateGen(a0, in_bit2,basic_gate_set);
-  auto a1Comp = singleQubitGateGen(a1, in_bit1,basic_gate_set);
-  auto b0Comp = singleQubitGateGen(b0, in_bit2,basic_gate_set);
-  auto b1Comp = singleQubitGateGen(b1, in_bit1,basic_gate_set);
+  auto a0Comp = singleQubitGateGen(a0, in_bit1,basic_gate_set);
+  auto a1Comp = singleQubitGateGen(a1, in_bit2,basic_gate_set);
+  auto b0Comp = singleQubitGateGen(b0, in_bit1,basic_gate_set);
+  auto b1Comp = singleQubitGateGen(b1, in_bit2,basic_gate_set);
 
   auto interactionComp =
-      generateInteractionComposite(in_bit2, in_bit1, x, y, z);
+      generateInteractionComposite(in_bit1, in_bit2, x, y, z);
 
   std::vector<qllvm::kak::TMP_OP> totalComposite;
   qllvm::kak::mergeVectors(totalComposite, b0Comp);
