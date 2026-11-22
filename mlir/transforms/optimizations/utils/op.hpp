@@ -22,10 +22,19 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 #include "Quantum/QuantumOps.h"
+#include "llvm/ADT/DenseMap.h"
 
 using namespace mlir;
 namespace qllvm {
 namespace OP{
+  // Modified 2026-11-19: use only while inspecting an unchanged SSA graph.
+  // Keep this local to a read-only phase; never retain it across rewrites,
+  // erased operations, or pass invocations.
+  class QuantumWireResolver {
+    llvm::DenseMap<mlir::Value, std::pair<std::string, int64_t>> cache;
+  public:
+    std::pair<std::string, int64_t> resolve(mlir::Value value);
+  };
   std::pair<std::string, int64_t>  getbit_from_extractQubitOp(mlir::quantum::ExtractQubitOp op);
   std::pair<std::string, int64_t>  getbit_from_muti_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op,int index);
   std::pair<std::string, int64_t>  getbit_from_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op);

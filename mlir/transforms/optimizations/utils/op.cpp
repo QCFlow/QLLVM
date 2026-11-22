@@ -13,135 +13,107 @@
  */
 #include "op.hpp"
 #include <iostream>
+#include <cmath>
+#include <stdexcept>
+// Modified for the QLLVM correctness revision (2026): never guess unknown angles as zero.
 using namespace mlir;
 namespace qllvm {
 namespace OP{
 
-std::pair<std::string, int64_t> getbit_from_extractQubitOp(mlir::quantum::ExtractQubitOp op){
-
-    auto b = op.idx();
-    auto q = op.qreg();
-    std::string q_name ="";
-    auto def_op1 = q.getDefiningOp();
-    if (auto const_def_op1 = dyn_cast_or_null<mlir::quantum::QallocOp>(def_op1)) {
-        q_name = const_def_op1.name().str();
-    }
-
-    auto def_op = b.getDefiningOp();
-    
-    if (auto const_def_op = dyn_cast_or_null<mlir::ConstantIntOp>(def_op)) {
-        int64_t bit_val = const_def_op.getValue();
-        // std::cout << "Get constant param: " << bit_val << "\n";
-        return std::make_pair(q_name, bit_val);
-    }
-}
-
-std::pair<std::string, int64_t> getbit_from_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op){
-    auto qubit = op.qubits()[0];
-    auto defop = qubit.getDefiningOp();
-    if (auto a = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(defop)) {
-        if(a.qubits().size()==1){
-            return OP::getbit_from_valueSemanticsInstOp(a);
-        }else{
-            // auto def_op = qubit.dyn_cast_or_null<mlir::OpResult>();
-            // auto r = def_op.getOwner();
-            // if (auto const_def_op = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(r)) {
-            //     assert(const_def_op.getNumResults()!=1);
-                int index = -1;
-                for(int i = 0;i<a.result().size();i++){
-                    if(a.result()[i] == qubit){
-                        index = i;
-                    }
-                }
-                return OP::getbit_from_muti_valueSemanticsInstOp(a,index);
-            // }
-        }
-    }else if (auto a = dyn_cast_or_null<mlir::quantum::ExtractQubitOp>(defop)){
-        return OP::getbit_from_extractQubitOp(a);
-    }else {
-        std::cout<<"There is a problem"<<std::endl;
-    }
-}
-
-std::pair<std::string, int64_t> getbit_from_muti_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op,int index){
-    mlir::Value qubit = op.qubits()[index];
-    
-    auto defop = qubit.getDefiningOp();
-    if(defop)
-        if (auto a = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(defop)) {
-            if(a.qubits().size()==1){
-                return OP::getbit_from_valueSemanticsInstOp(a);
-            }else{
-                // auto def_op = qubit.dyn_cast_or_null<mlir::OpResult>();
-                // auto r = def_op.getOwner();
-                // if (auto const_def_op = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(r)) {
-                //     assert(const_def_op.getNumResults()!=1);
-                    int s = -1;
-                    for(int i = 0;i<a.result().size();i++){
-                        if(a.result()[i] == qubit){
-                            s = i;
-                        }
-                    }
-                    return OP::getbit_from_muti_valueSemanticsInstOp(a,s);
-                // }
+// Follow the actual SSA result number; malformed/unsupported handles are errors.
+static std::pair<std::string, int64_t> resolveQuantumWire(
+    mlir::Value value,
+    llvm::DenseMap<mlir::Value, std::pair<std::string, int64_t>> *cache = nullptr) {
+    std::vector<mlir::Value> path;
+    auto remember = [&](const std::pair<std::string, int64_t> &wire) {
+        if (cache) for (auto visited : path) (*cache)[visited] = wire;
+        return wire;
+    };
+    for (unsigned step = 0; step < 100000; ++step) {
+        if (cache) {
+            auto found = cache->find(value);
+            if (found != cache->end()) {
+                // Copy before inserting: DenseMap growth invalidates references.
+                const auto wire = found->second;
+                return remember(wire);
             }
-        }else if (auto a = dyn_cast_or_null<mlir::quantum::ExtractQubitOp>(defop)){
-            return OP::getbit_from_extractQubitOp(a);
-        }else {
-            std::cout<<"There is a problem"<<std::endl;
+            path.push_back(value);
         }
+        auto *owner = value.getDefiningOp();
+        if (!owner) throw std::runtime_error("Unsupported block argument in quantum wire resolution");
+        if (auto extract = dyn_cast<mlir::quantum::ExtractQubitOp>(owner)) {
+            auto alloc = extract.qreg().getDefiningOp<mlir::quantum::QallocOp>();
+            if (!alloc) throw std::runtime_error("Quantum register is not a fixed allocation");
+            if (auto index = extract.idx().getDefiningOp<mlir::ConstantIntOp>())
+                return remember({alloc.name().str(), index.getValue()});
+            if (auto index = extract.idx().getDefiningOp<mlir::ConstantIndexOp>())
+                return remember({alloc.name().str(), index.getValue()});
+            throw std::runtime_error("Unresolved quantum register index");
+        }
+        if (auto gate = dyn_cast<mlir::quantum::ValueSemanticsInstOp>(owner)) {
+            auto result = value.dyn_cast<mlir::OpResult>();
+            if (!result || result.getResultNumber() >= gate.qubits().size())
+                throw std::runtime_error("Invalid quantum SSA result index");
+            value = gate.qubits()[result.getResultNumber()];
+            continue;
+        }
+        throw std::runtime_error("Unsupported defining operation for quantum wire");
+    }
+    throw std::runtime_error("Quantum wire resolution exceeded its structural bound");
 }
 
-std::vector<std::pair<std::string, int64_t>> getbit_from_muti_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op){
-    std::vector<std::pair<std::string, int64_t>> bits;
-    for(auto qubit : op.qubits()){
-        auto defop = qubit.getDefiningOp();
-        if(defop)
-            if (auto a = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(defop)) {
-                if(a.qubits().size()==1){
-                    bits.emplace_back(OP::getbit_from_valueSemanticsInstOp(a));
-                }else{
-                    // auto def_op = qubit.dyn_cast_or_null<mlir::OpResult>();
-                    // auto r = def_op.getOwner();
-                    // if (auto const_def_op = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(r)) {
-                    //     assert(const_def_op.getNumResults()!=1);
-                        int index = -1;
-                        for(int i = 0;i<a.result().size();i++){
-                            if(a.result()[i] == qubit){
-                                index = i;
-                            }
-                        }
-                        bits.emplace_back(OP::getbit_from_muti_valueSemanticsInstOp(a,index));
-                    // }
-                }
-            }else if (auto a = dyn_cast_or_null<mlir::quantum::ExtractQubitOp>(defop)){
-                bits.emplace_back(OP::getbit_from_extractQubitOp(a));
-            }else {
-                std::cout<<"There is a problem"<<std::endl;
-            }
-    }
-    return bits;
+std::pair<std::string, int64_t> QuantumWireResolver::resolve(mlir::Value value) {
+    return resolveQuantumWire(value, &cache);
+}
+
+std::pair<std::string, int64_t> getbit_from_extractQubitOp(mlir::quantum::ExtractQubitOp op) {
+    return resolveQuantumWire(op.qbit());
+}
+std::pair<std::string, int64_t> getbit_from_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op) {
+    if (op.qubits().empty()) throw std::runtime_error("Quantum operation has no operands");
+    return resolveQuantumWire(op.qubits()[0]);
+}
+std::pair<std::string, int64_t> getbit_from_muti_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op,int index) {
+    if (index < 0 || size_t(index) >= op.qubits().size())
+        throw std::runtime_error("Quantum operand index is out of range");
+    return resolveQuantumWire(op.qubits()[index]);
+}
+std::vector<std::pair<std::string, int64_t>> getbit_from_muti_valueSemanticsInstOp(mlir::quantum::ValueSemanticsInstOp op) {
+    std::vector<std::pair<std::string, int64_t>> result;
+    for (auto value : op.qubits()) result.push_back(resolveQuantumWire(value));
+    return result;
 }
 
 double tryGetConstAngle(mlir::Value theta_var){
-    if (!theta_var.getType().isa<mlir::FloatType>()) {
-        return 0;
-    }
+    if (!theta_var.getType().isa<mlir::FloatType>())
+        throw std::runtime_error("Gate angle is not a supported floating-point constant");
     // Find the defining op:
     auto def_op = theta_var.getDefiningOp();
     if (def_op) {
+        const auto name = def_op->getName().getStringRef();
+        if (def_op->getNumOperands() == 1 &&
+            (name == "std.sin" || name == "std.cos" || name == "std.sqrt" ||
+             name == "std.exp" || name == "std.log" || name == "std.log2" || name == "std.atan")) {
+            double x = tryGetConstAngle(def_op->getOperand(0));
+            double value = name == "std.sin" ? std::sin(x) : name == "std.cos" ? std::cos(x) :
+                           name == "std.sqrt" ? std::sqrt(x) : name == "std.exp" ? std::exp(x) :
+                           name == "std.log" ? std::log(x) : name == "std.log2" ? std::log2(x) : std::atan(x);
+            if (!std::isfinite(value)) throw std::runtime_error("Non-finite gate angle expression");
+            return value;
+        }
         // Try cast:
         if (auto const_def_op =
                 dyn_cast_or_null<mlir::ConstantFloatOp>(def_op)) {
             llvm::APFloat theta_var_const_cal = const_def_op.getValue();
             double angle = theta_var_const_cal.convertToDouble();
+            if (!std::isfinite(angle)) throw std::runtime_error("Non-finite constant gate angle");
             // std::cout << angle <<std::endl;
             return angle;
         }else if(auto const_def_op =
                 dyn_cast_or_null<mlir::DivFOp>(def_op)) {
             double left_value = tryGetConstAngle(const_def_op.lhs());
             double right_value = tryGetConstAngle(const_def_op.rhs());
-            assert(right_value != 0);
+            if (right_value == 0) throw std::runtime_error("Division by zero in gate angle");
             return left_value / right_value;
         }else if(auto const_def_op =
                 dyn_cast_or_null<mlir::MulFOp>(def_op)) {
@@ -176,7 +148,7 @@ double tryGetConstAngle(mlir::Value theta_var){
             theta_var.dump();  
         }
     }
-    return 0;
+    throw std::runtime_error("Unsupported symbolic or runtime gate angle");
 }
 
 }//namespace OP

@@ -16,43 +16,52 @@
 using namespace mlir;
 namespace qllvm {
 namespace circuit{
-int getDepth(mlir::quantum::ValueSemanticsInstOp & op){
-  mlir::OpBuilder rewriter(op);
-  int op_depth = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("depth")).getInt();
-  if(op_depth != 0){
-    return op_depth;
-  }
-  auto results = op.getResults();
-  for(auto result : results){
-    int childenDepth = 0;
-    if (result.hasOneUse()) {
-      // get that one user
-      auto user = *result.user_begin();
-      // cast to a inst op
-      if (auto next_inst =
-              dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(user)) {
-                childenDepth = next_inst.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("depth")).getInt();
-                if(childenDepth == 0){
-                  childenDepth = getDepth(next_inst);
-                }
-              }else{
-                if(auto OP = dyn_cast_or_null<mlir::quantum::InstOp>(user)){
-                  if("mz"==OP.name()){
-                    childenDepth = 1;
-                  }
-                }
-              }
+// Modified 2026-11-19: explicit DFS postorder avoids overflowing the native
+// stack on long wires (e.g. HWB11 with custom-pass statistics enabled).
+int getDepth(mlir::quantum::ValueSemanticsInstOp &op) {
+  auto cachedDepth = [](mlir::quantum::ValueSemanticsInstOp gate) {
+    auto depth = gate->getAttrOfType<mlir::IntegerAttr>("depth");
+    return depth ? static_cast<int>(depth.getInt()) : 0;
+  };
+  if (int depth = cachedDepth(op)) return depth;
+  std::vector<std::pair<mlir::quantum::ValueSemanticsInstOp, bool>> pending;
+  pending.emplace_back(op, false);
+  while (!pending.empty()) {
+    auto current = pending.back();
+    pending.pop_back();
+    auto gate = current.first;
+    if (cachedDepth(gate)) continue;
+    if (!current.second) {
+      pending.emplace_back(gate, true);
+      for (auto result : gate.getResults()) {
+        if (!result.hasOneUse()) continue;
+        if (auto next = dyn_cast<mlir::quantum::ValueSemanticsInstOp>(*result.user_begin()))
+          if (!cachedDepth(next)) pending.emplace_back(next, false);
+      }
+      continue;
     }
-
-    if(op_depth < childenDepth + 1 ){
-      op_depth = childenDepth + 1;
+    int depth = 0;
+    for (auto result : gate.getResults()) {
+      int childDepth = 0;
+      if (result.hasOneUse()) {
+        auto *user = *result.user_begin();
+        if (auto next = dyn_cast<mlir::quantum::ValueSemanticsInstOp>(user))
+          childDepth = cachedDepth(next);
+        else if (auto inst = dyn_cast<mlir::quantum::InstOp>(user))
+          if (inst.name() == "mz") childDepth = 1;
+      }
+      depth = std::max(depth, childDepth + 1);
     }
+    mlir::OpBuilder rewriter(gate);
+    gate->setAttr("depth", rewriter.getI32IntegerAttr(depth));
   }
-  op.getOperation()->setAttr(llvm::StringRef("depth"),mlir::IntegerAttr::get(rewriter.getI32Type(), op_depth));
-  return op_depth;
+  return cachedDepth(op);
 }
 
 void getGateCountAndTopOp(int &gate_count, std::vector<mlir::quantum::ValueSemanticsInstOp> &top_op, mlir::ModuleOp ops){
+    // Modified for correctness: no stale handles after a rewriting pass.
+    gate_count = 0;
+    top_op.clear();
     ops.walk([&](mlir::quantum::ValueSemanticsInstOp op) {
       mlir::OpBuilder rewriter(op);
       op.getOperation()->setAttr(llvm::StringRef("depth"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
@@ -63,8 +72,8 @@ void getGateCountAndTopOp(int &gate_count, std::vector<mlir::quantum::ValueSeman
       auto first_operand = op.getOperand(0);
       int num_operand = op.getNumResults();
       
-      auto firstoperand = first_operand.dyn_cast_or_null<mlir::OpResult>();
-      auto operation = firstoperand.getOwner();
+      auto firstoperand = first_operand.dyn_cast<mlir::OpResult>();
+      auto operation = firstoperand ? firstoperand.getOwner() : nullptr;
       auto owner1 = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(operation);
       if(!owner1){
         top_op.emplace_back(op);
@@ -72,8 +81,8 @@ void getGateCountAndTopOp(int &gate_count, std::vector<mlir::quantum::ValueSeman
       }
       if(num_operand > 1){
         for(int i = 1; i < num_operand; i++){
-          auto secondoperand = op.getOperand(i).dyn_cast_or_null<mlir::OpResult>();
-          auto secondoperation = secondoperand.getOwner();
+          auto secondoperand = op.getOperand(i).dyn_cast<mlir::OpResult>();
+          auto secondoperation = secondoperand ? secondoperand.getOwner() : nullptr;
           auto owner2 = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(secondoperation);
           if(!owner2){
             top_op.emplace_back(op);
@@ -101,9 +110,9 @@ void getGateCount(int &gate_count, mlir::ModuleOp ops){
 
 int getDepth(mlir::ModuleOp ops){
   std::vector<mlir::quantum::ValueSemanticsInstOp> top_op;
-  int gate_count;
-  int tmp_depth;
-  int depth;
+  int gate_count = 0;
+  int tmp_depth = 0;
+  int depth = 0;
   getGateCountAndTopOp(gate_count, top_op, ops);
   for (auto &op : top_op) {
     tmp_depth = circuit::getDepth(op);

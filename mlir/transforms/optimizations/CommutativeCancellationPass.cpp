@@ -1,8 +1,6 @@
 
 /*
  * This code is part of QLLVM.
- * Modified by QCFlow (2026): avoid lookup copies and group scans, add exact
- * CX fast paths, and preserve circuit order when cancelling or merging gates.
  *
  * (C) Copyright QCFlow 2026.
  *
@@ -32,6 +30,7 @@
 #include <cassert>
 #include "utils/circuit.hpp"
 #include "utils/get_matrix.hpp"
+#include "utils/local_unitary.hpp"
 #include "gen_qasm.hpp"
 #include "utils/op.hpp"
 #include <Eigen/Dense>
@@ -39,7 +38,10 @@
 #include <unordered_map>
 #include <tr1/unordered_map>
 #include <stdexcept>
-#include <algorithm>
+#include <unordered_set>
+#include <cstring>
+#include <cstdlib>
+#include <chrono>
 
 namespace qllvm {
 void CommutativeCancellationPass::getDependentDialects(
@@ -47,287 +49,254 @@ void CommutativeCancellationPass::getDependentDialects(
   registry.insert<LLVM::LLVMDialect>();
 }
 
-template<typename K, typename V>
-class BiMap {
+// Modified 2026-11-20: compact groups, preserving the old map key order.
+// A wire's SSA chain visits an operation once; reverse maps were never queried.
+using Wire = std::pair<std::string, int64_t>;
+using WireTable = llvm::DenseMap<mlir::Operation *, std::vector<Wire>>;
+class OperationGroup {
+  std::vector<mlir::quantum::ValueSemanticsInstOp> operations;
 public:
-    //  insert key-value pair
-    BiMap() = default;
-    void insert(const K& key, const V& value) {
-        if (key_to_value.find(key) != key_to_value.end()) {
-            throw std::invalid_argument("Duplicated key or value");
-        }
-        key_to_value[key] = value;
-        value_to_key[value] = key;
-    }
-
-    //  according to key to find value
-    V getValue(const K& key) const {
-        auto it = key_to_value.find(key);
-        if (it != key_to_value.end()) {
-            return it->second;
-        }
-        throw std::out_of_range("Key not found");
-    }
-
-    //  according to value to find key
-    K getKey(const V& value) const {
-        auto it = value_to_key.find(value);
-        if (it != value_to_key.end()) {
-            return it->first;
-        }
-        throw std::out_of_range("Value not found");
-    }
-
-    //    according to a key to delete
-    void removeByKey(const K& key) {
-        auto it = key_to_value.find(key);
-        if (it != key_to_value.end()) {
-            value_to_key.erase(it->second);
-            key_to_value.erase(it);
-        }
-    }
-
-    //  according to a value to delete
-    void removeByValue(const V& value) {
-        auto it = value_to_key.find(value);
-        if (it != value_to_key.end()) {
-            key_to_value.erase(it->second);
-            value_to_key.erase(it);
-        }
-    }
-
-    //  check if the key is contained
-    bool containsKey(const K& key) const {
-        return key_to_value.find(key) != key_to_value.end();
-    }
-
-    //  check if the value is contained
-    bool containsValue(const V& value) const {
-        return value_to_key.find(value) != value_to_key.end();
-    }
-
-    std::vector<K> getKeys() const {
-      std::vector<K> keys;
-      for (const auto& pair : key_to_value) {
-          keys.emplace_back(pair.first);
-      }
-      // std::reverse(keys.begin(), keys.end());
-      return keys;
-    }
-
-private:
-    std::map<K, V> key_to_value;
-    std::map<V, K> value_to_key;
+  void insert(mlir::quantum::ValueSemanticsInstOp op, const Wire &) {
+    operations.push_back(op);
+  }
+  const std::vector<mlir::quantum::ValueSemanticsInstOp> &getKeys() const {
+    // Modified 2026-11-22: findcommutativegate follows this wire's SSA
+    // def-use chain. Insertion order is already causal circuit order;
+    // sorting by operation address adds work and makes rewrites depend
+    // on allocator layout instead of the program.
+    return operations;
+  }
 };
 
-std::unordered_map<std::string, int> qbit_seq;
-std::vector<std::pair<std::string, int64_t>> wire_set;
-std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hashTable;
-
-// A two-qubit gate belongs to a commutation group on each of its wires.
-// Build this reverse index once instead of scanning all groups per candidate.
-using CommutationGroupIndex =
-    std::map<std::pair<std::string, int64_t>,
-             std::unordered_map<mlir::Operation *, int>>;
-
-
-bool CommutationChecker(mlir::quantum::ValueSemanticsInstOp op1,mlir::quantum::ValueSemanticsInstOp op2,
-  const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,const std::unordered_map<std::string, int> &qbitseq){
-  if(op1.name() == "mz" || op2.name() == "mz"){
-    return false;
-  }
-  auto qbits_op1 = op1.getNumResults();
-  auto qbits_op2 = op2.getNumResults();
-  std::vector<std::pair<std::string, int64_t>> index_two_1;
-  std::vector<std::pair<std::string, int64_t>> index_two_2;
-  std::pair<std::string, int64_t> index_one_1;
-  std::pair<std::string, int64_t> index_one_2;
-
-  Eigen::MatrixXcd mat_op1;
-  Eigen::MatrixXcd mat_op2;
-
-
-  auto number1 = op1.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-  auto number2 = op2.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-  const auto &temp1 = hash_Table.at(number1);
-  const auto &temp2 = hash_Table.at(number2);
-
-  // Check common gates before allocating matrices. These identities are exact;
-  // in particular RZ commutes with the control, RX with the target of CX.
-  const auto name1 = op1.name();
-  const auto name2 = op2.name();
-  const bool cx1 = name1 == "cx" || name1 == "cnot";
-  const bool cx2 = name2 == "cx" || name2 == "cnot";
-  if (cx1 && cx2 && temp1.size() == 2 && temp2.size() == 2)
-    return temp1.front() != temp2.back() && temp2.front() != temp1.back();
-  if (cx1 && temp1.size() == 2 && temp2.size() == 1) {
-    if (name2 == "rz" && temp2.front() == temp1.front()) return true;
-    if (name2 == "rx" && temp2.front() == temp1.back()) return true;
-  }
-  if (cx2 && temp2.size() == 2 && temp1.size() == 1) {
-    if (name1 == "rz" && temp1.front() == temp2.front()) return true;
-    if (name1 == "rx" && temp1.front() == temp2.back()) return true;
-  }
-
-  const auto isControlledPauli = [](llvm::StringRef name) {
-    return name == "cx" || name == "cnot" || name == "cy" || name == "cz";
+// Modified 2026-11-20: memoize exact gate descriptors and operand-relative
+// commutation checks within a read-only analysis. Nothing survives IR rewriting.
+class CommutationAnalysis {
+  const WireTable &hashTable;
+  enum class Axis { None, X, Y, Z };
+  struct Gate {
+    Axis axis = Axis::None;
+    Eigen::MatrixXcd matrix;
+    bool valid = false;
+    bool diagonal = false;
   };
+  struct Identity { size_t gate, placement, family; };
+  std::vector<Gate> gates;
+  std::unordered_map<std::string, size_t> gateIds, placementIds, familyIds;
+  llvm::DenseMap<mlir::Operation *, Identity> identities;
+  std::unordered_map<std::string, bool> results;
+  static constexpr size_t maxResults = 65536;
 
-  if(qbits_op1 == 1){
-    // index_one_1 = OP::getbit_from_valueSemanticsInstOp(op1);
-    index_one_1 = temp1.front();
-    mat_op1 = qllvm::matrix::getGateMat(op1,0);
-  }else{
-    // index_two_1 = OP::getbit_from_muti_valueSemanticsInstOp(op1);
-    index_two_1 = temp1;
-    if(qllvm::matrix::ForwardOrReverse(index_two_1,qbitseq)){
-      mat_op1 = qllvm::matrix::getGateMat(op1,0);
-    }else{
-      mat_op1 = qllvm::matrix::getGateMat(op1,1);
-    }
+  template<class T> static void append(std::string &key, const T &value) {
+    key.append(reinterpret_cast<const char *>(&value), sizeof(value));
   }
-
-  if(qbits_op2 == 1){
-    // index_one_2 = OP::getbit_from_valueSemanticsInstOp(op2);
-    index_one_2 = temp2.front();
-    mat_op2 = qllvm::matrix::getGateMat(op2,0);
-  }else{
-    // index_two_2 = OP::getbit_from_muti_valueSemanticsInstOp(op2);
-    index_two_2 = temp2;
-    if(qllvm::matrix::ForwardOrReverse(index_two_2,qbitseq)){
-      mat_op2 = qllvm::matrix::getGateMat(op2,0);
-    }else{
-      mat_op2 = qllvm::matrix::getGateMat(op2,1);
+  Identity identity(mlir::quantum::ValueSemanticsInstOp op) {
+    auto found = identities.find(op.getOperation());
+    if (found != identities.end()) return found->second;
+    std::string key = op.name().str();
+    key.push_back('\0');
+    // Exact floating-point bits: never round angles in a correctness cache.
+    bool finite = true;
+    try {
+      for (size_t i = op.getNumResults(); i < op.getNumOperands(); ++i) {
+        const double parameter = OP::tryGetConstAngle(op.getOperand(i));
+        finite &= std::isfinite(parameter);
+        append(key, parameter);
+      }
+    } catch (const std::exception &) { finite = false; }
+    append(key, finite);
+    const auto width = op.getNumResults();
+    append(key, width);
+    auto inserted = gateIds.emplace(key, gates.size());
+    size_t gate = inserted.first->second;
+    if (inserted.second) {
+      Gate descriptor;
+      if (finite && width > 0 && width <= 2 &&
+          op.name() != "mz" && op.name() != "reset") {
+        try {
+          descriptor.matrix = matrix::getGateMat(op, 0);
+          descriptor.valid = descriptor.matrix.allFinite() &&
+              descriptor.matrix.rows() == (1 << width) &&
+              descriptor.matrix.cols() == (1 << width);
+          // Only exact diagonal matrices get the algebraic shortcut.
+          descriptor.diagonal = descriptor.valid;
+          for (int i = 0; i < descriptor.matrix.rows(); ++i)
+            for (int j = 0; j < descriptor.matrix.cols(); ++j)
+              if (i != j && descriptor.matrix(i, j) != std::complex<double>(0, 0))
+                descriptor.diagonal = false;
+        } catch (const std::exception &) {}
+      }
+      gates.push_back(std::move(descriptor));
     }
+    // A family is an algebraic constraint, never a matrix-cache key. Keep
+    // distinct angles in their exact descriptors for the numerical fallback.
+    if (gates[gate].valid && width == 1) {
+      auto name = op.name();
+      if (name == "rx" || name == "x" || name == "sx") gates[gate].axis = Axis::X;
+      else if (name == "ry" || name == "y") gates[gate].axis = Axis::Y;
+      else if (name == "rz" || name == "z" || name == "p" || name == "u1" ||
+               name == "t" || name == "tdg" || name == "s" || name == "sdg")
+        gates[gate].axis = Axis::Z;
+    }
+    std::string placement;
+    append(placement, gate);
+    for (const auto &wire : hashTable.find(op.getOperation())->second) {
+      placement.append(wire.first);
+      placement.push_back('\0');
+      append(placement, wire.second);
+    }
+    size_t id = placementIds.emplace(placement, placementIds.size()).first->second;
+    std::string family;
+    const auto axis = gates[gate].axis;
+    append(family, axis);
+    if (axis == Axis::None) append(family, id);
+    else for (const auto &wire : hashTable.find(op.getOperation())->second) {
+      family.append(wire.first); family.push_back('\0'); append(family, wire.second);
+    }
+    size_t familyId = familyIds.emplace(family, familyIds.size()).first->second;
+    Identity value{gate, id, familyId};
+    identities.insert({op.getOperation(), value});
+    return value;
   }
-
-  Eigen::MatrixXcd l_result;
-  Eigen::MatrixXcd r_result;
-  Eigen::MatrixXcd operator_1;
-  Eigen::MatrixXcd operator_2;
-  std::vector<std::pair<std::string, int64_t>> tmp_two;
-
-  int64_t extra_qarg;
-  int64_t size;
-  Eigen::MatrixXcd id_op = Eigen::MatrixXcd::Identity(2, 2);
-
-  if(qbits_op1 == qbits_op2){
-    if(qbits_op1 == 1){
-      l_result = mat_op1 * mat_op2;//op1 * op2
-      r_result = mat_op2 * mat_op1;//op2 * op1
-    }else{
-      if(index_two_2 == index_two_1 || (index_two_2.front() == index_two_1.back() && index_two_2.back() == index_two_1.front())){
-        l_result = mat_op1 * mat_op2;//op1 * op2
-        r_result = mat_op2 * mat_op1;//op2 * op1
-      }else if(index_two_2.front() == index_two_1.front() && index_two_2.back() != index_two_1.back()){
-        // Sharing an operand is not sufficient for arbitrary two-qubit gates.
-        return isControlledPauli(name1) && isControlledPauli(name2);
-      }else if(index_two_1.back() == index_two_2.back() && index_two_1.front() != index_two_2.front()){
-        // CX and CZ with a shared target do NOT commute. Only apply this
-        // shortcut to identical controlled Pauli axes.
-        return name1 == name2 && isControlledPauli(name1);
-      }else{
-        if(index_two_1.back() == index_two_2.front() && index_two_1.front() != index_two_2.back()){
-          tmp_two.clear();
-          tmp_two.emplace_back(index_two_1.front());
-          tmp_two.emplace_back(index_two_2.back());
-          if(qllvm::matrix::ForwardOrReverse(index_two_1,qbit_seq) && qllvm::matrix::ForwardOrReverse(tmp_two,qbit_seq)){
-            operator_1 = Eigen::kroneckerProduct(id_op,mat_op1);
-            operator_2 = Eigen::kroneckerProduct(mat_op2,id_op);
-            l_result = operator_1 * operator_2;
-            r_result = operator_2 * operator_1;
-          }else if(!qllvm::matrix::ForwardOrReverse(index_two_1,qbit_seq) && !qllvm::matrix::ForwardOrReverse(tmp_two,qbit_seq)){
-            operator_1 = Eigen::kroneckerProduct(mat_op1,id_op);
-            operator_2 = Eigen::kroneckerProduct(id_op,mat_op2);
-            l_result = operator_1 * operator_2;
-            r_result = operator_2 * operator_1;
-          }else{
-            return false;
-          }
-        }else if(index_two_1.front() == index_two_2.back() && index_two_1.back() != index_two_2.front()){
-          tmp_two.clear();
-          tmp_two.emplace_back(index_two_1.back());
-          tmp_two.emplace_back(index_two_2.front());
-          if(qllvm::matrix::ForwardOrReverse(index_two_1,qbit_seq) && !qllvm::matrix::ForwardOrReverse(tmp_two,qbit_seq)){
-            operator_1 = Eigen::kroneckerProduct(mat_op1,id_op);
-            operator_2 = Eigen::kroneckerProduct(id_op,mat_op2);
-            l_result = operator_1 * operator_2;
-            r_result = operator_2 * operator_1;
-          }else if(!qllvm::matrix::ForwardOrReverse(index_two_1,qbit_seq) && qllvm::matrix::ForwardOrReverse(tmp_two,qbit_seq)){
-            operator_1 = Eigen::kroneckerProduct(id_op,mat_op1);
-            operator_2 = Eigen::kroneckerProduct(mat_op2,id_op);
-            l_result = operator_1 * operator_2;
-            r_result = operator_2 * operator_1;
-          }else{
-            return false;
-          }
-        }else{
-          return false;
-        }
+public:
+  explicit CommutationAnalysis(const WireTable &wires) : hashTable(wires) {}
+  size_t familyProbes = 0, matrixChecks = 0, cacheHits = 0;
+  size_t family(mlir::quantum::ValueSemanticsInstOp op) { return identity(op).family; }
+  // Sufficient exact proofs for every member of the representative's family.
+  // A failed proof is unknown, not noncommuting: special angles still fall back
+  // to their own matrices. Do not infer an axis from a special-angle matrix.
+  bool familyCommutes(mlir::quantum::ValueSemanticsInstOp op1,
+                      mlir::quantum::ValueSemanticsInstOp op2) {
+    ++familyProbes;
+    if (op1->getBlock() != op2->getBlock()) return false;
+    const auto id1 = identity(op1), id2 = identity(op2);
+    const auto &a = gates[id1.gate], &b = gates[id2.gate];
+    if (!a.valid || !b.valid) return false;
+    const auto &wa = hashTable.find(op1.getOperation())->second;
+    const auto &wb = hashTable.find(op2.getOperation())->second;
+    if (wa.empty() || wb.empty()) return false;
+    if (id1.family == id2.family) return true;
+    bool disjoint = true;
+    for (const auto &wire : wa)
+      if (std::find(wb.begin(), wb.end(), wire) != wb.end()) disjoint = false;
+    if (disjoint) return true;
+    const bool diagonalA = a.axis == Axis::Z || (a.axis == Axis::None && a.diagonal);
+    const bool diagonalB = b.axis == Axis::Z || (b.axis == Axis::None && b.diagonal);
+    if (diagonalA && diagonalB) return true;
+    auto controlled = [](Axis axis, const auto &singleWire, auto gate, const auto &wires) {
+      if (axis == Axis::None || wires.size() != 2) return false;
+      if (gate == "cx" || gate == "cy") {
+        if (singleWire == wires[0] && axis == Axis::Z) return true;
+        if (singleWire == wires[1] &&
+            axis == (gate == "cx" ? Axis::X : Axis::Y)) return true;
       }
-    }
-      
-  }else {
-    if(qbits_op1 > qbits_op2){
-      if(qllvm::matrix::ForwardOrReverse(index_two_1,qbitseq)){
-        if(index_one_2 == index_two_1.front()){
-          operator_1 = Eigen::kroneckerProduct(id_op,mat_op2);
-        }else{
-          operator_1 = Eigen::kroneckerProduct(mat_op2,id_op);
-        }
-        l_result = operator_1 * mat_op1;
-        r_result = mat_op1 * operator_1;
-      }else{
-        if(index_one_2 == index_two_1.front()){
-          operator_1 = Eigen::kroneckerProduct(mat_op2,id_op);
-        }else{
-          operator_1 = Eigen::kroneckerProduct(id_op,mat_op2);
-        }
-        l_result = operator_1 * mat_op1;
-        r_result = mat_op1 * operator_1;
-      }
-    }else{
-      if(qllvm::matrix::ForwardOrReverse(index_two_2,qbitseq)){
-        if(index_one_1 == index_two_2.front()){
-          operator_1 = Eigen::kroneckerProduct(id_op,mat_op1);
-        }else{
-          operator_1 = Eigen::kroneckerProduct(mat_op1,id_op);
-        }
-        l_result = operator_1 * mat_op2;
-        r_result = mat_op2 * operator_1;
-      }else{
-        if(index_one_1 == index_two_2.front()){
-          operator_1 = Eigen::kroneckerProduct(mat_op1,id_op);
-        }else{
-          operator_1 = Eigen::kroneckerProduct(id_op,mat_op1);
-        }
-        l_result = operator_1 * mat_op2;
-        r_result = mat_op2 * operator_1;
-      }
-    }
-    
-  }
-
-  if(l_result == r_result){
-    return true;
-  }else {
+      return gate == "cz" && axis == Axis::Z;
+    };
+    if (wa.size() == 1 && controlled(a.axis, wa[0], op2.name(), wb)) return true;
+    if (wb.size() == 1 && controlled(b.axis, wb[0], op1.name(), wa)) return true;
     return false;
   }
-}
+  bool diagonal(mlir::quantum::ValueSemanticsInstOp op) {
+    return gates[identity(op).gate].diagonal;
+  }
+  size_t placement(mlir::quantum::ValueSemanticsInstOp op) {
+    return identity(op).placement;
+  }
+  bool valid(mlir::quantum::ValueSemanticsInstOp op) {
+    return gates[identity(op).gate].valid;
+  }
+  bool commute(mlir::quantum::ValueSemanticsInstOp op1,
+               mlir::quantum::ValueSemanticsInstOp op2) {
+    if (op1->getBlock() != op2->getBlock()) return false;
+    const auto id1 = identity(op1), id2 = identity(op2);
+    const auto &first = gates[id1.gate], &second = gates[id2.gate];
+    if (!first.valid || !second.valid) return false;
+    const auto &wire1 = hashTable.find(op1.getOperation())->second;
+    const auto &wire2 = hashTable.find(op2.getOperation())->second;
+    if (wire1.empty() || wire2.empty()) return false;
+    if (first.diagonal && second.diagonal) return true;
+    if (id1.placement == id2.placement) return true;
+    std::vector<std::pair<std::string, int64_t>> wires = wire1;
+    for (const auto &wire : wire2)
+      if (std::find(wires.begin(), wires.end(), wire) == wires.end())
+        wires.push_back(wire);
+    if (wires.size() == wire1.size() + wire2.size()) return true;
+    auto axesFor = [&](const std::vector<std::pair<std::string, int64_t>> &operands) {
+      std::vector<size_t> axes;
+      for (const auto &wire : operands)
+        axes.push_back(std::distance(wires.begin(), std::find(wires.begin(), wires.end(), wire)));
+      return axes;
+    };
+    const auto axes1 = axesFor(wire1), axes2 = axesFor(wire2);
+    std::string key;
+    append(key, id1.gate); append(key, id2.gate);
+    for (auto axis : axes2) append(key, axis);
+    auto cached = results.find(key);
+    if (cached != results.end()) { ++cacheHits; return cached->second; }
+    ++matrixChecks;
+    bool commutes = false;
+    try {
+      const auto a = matrix::embedLocalUnitary(first.matrix, axes1, wires.size());
+      const auto b = matrix::embedLocalUnitary(second.matrix, axes2, wires.size());
+      commutes = (a * b - b * a).norm() <= 1e-12;
+    } catch (const std::exception &) {}
+    if (results.size() < maxResults) results.emplace(std::move(key), commutes);
+    return commutes;
+  }
+};
 
-void findcommutativegate(mlir::quantum::ValueSemanticsInstOp op,std::vector<mlir::quantum::ValueSemanticsInstOp> &commutation_ops,
-std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>> &sub_commutation_vect, std::pair<std::string, int64_t> &wire, int &index){
+// Modified 2026-11-20: group obligations by generator and ordered support.
+// A generic proof checks a whole family once. Unknown relations retain every
+// exact representative, preserving the prior special-angle opportunities.
+class CommutationFrontier {
+  struct Family {
+    std::vector<mlir::quantum::ValueSemanticsInstOp> members;
+  };
+  CommutationAnalysis &analysis;
+  std::vector<Family> families;
+  std::unordered_map<size_t, size_t> index;
+  std::unordered_set<size_t> placements;
+  mlir::Block *block = nullptr;
+  bool allDiagonal = false;
+public:
+  explicit CommutationFrontier(CommutationAnalysis &analysis) : analysis(analysis) {}
+  void reset(mlir::quantum::ValueSemanticsInstOp op) {
+    families.clear(); index.clear(); placements.clear();
+    block = op->getBlock(); allDiagonal = true; add(op);
+  }
+  void add(mlir::quantum::ValueSemanticsInstOp op) {
+    allDiagonal = allDiagonal && analysis.diagonal(op);
+    if (!placements.insert(analysis.placement(op)).second) return;
+    auto inserted = index.emplace(analysis.family(op), families.size());
+    if (inserted.second) families.emplace_back();
+    families[inserted.first->second].members.push_back(op);
+  }
+  bool accepts(mlir::quantum::ValueSemanticsInstOp op) {
+    if (op->getBlock() != block || !analysis.valid(op)) return false;
+    if (placements.count(analysis.placement(op)) || (allDiagonal && analysis.diagonal(op)))
+      return true;
+    for (auto &family : families) {
+      if (analysis.familyCommutes(op, family.members.front())) continue;
+      for (auto member : family.members)
+        if (!analysis.commute(op, member)) return false;
+    }
+    return true;
+  }
+};
+
+void findcommutativegate(mlir::quantum::ValueSemanticsInstOp op,
+std::vector<OperationGroup> &sub_commutation_vect, std::pair<std::string, int64_t> &wire, int &index, CommutationAnalysis &analysis, const WireTable &hashTable){
   bool does_commute;
   std::vector<std::pair<std::string, int64_t>> index_2bit;
   std::pair<std::string, int64_t> index_1bit;
   mlir::Value return_value;
 
+  CommutationFrontier frontier(analysis);
+  frontier.reset(op);
   bool cont = true;
   while(cont){
     does_commute = false;
-    auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
     if(op.getNumResults() == 2){
-      index_2bit = hashTable[number];
+      index_2bit = hashTable.find(op.getOperation())->second;
       if(index_2bit.front() == wire){
         return_value = op.getResult(0);
       }else{
@@ -340,24 +309,16 @@ std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, in
     if(return_value.hasOneUse()){
       auto user = *return_value.user_begin();
       if(auto next_inst = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(user)) {
-        for(auto &elem: commutation_ops){
-          does_commute = CommutationChecker(next_inst,elem,hashTable,qbit_seq);
-          if(!does_commute){
-            break;
-          }
-        }
-        
-        if(does_commute){
-          sub_commutation_vect[index].insert(next_inst,wire);
-          commutation_ops.emplace_back(next_inst);
-        }else{
-
-          index = index + 1;
-          commutation_ops.clear();
-          commutation_ops.emplace_back(next_inst);
-          BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>> sub_commutation_new;
-          sub_commutation_new.insert(next_inst,wire);
-          sub_commutation_vect.emplace_back(sub_commutation_new);
+        does_commute = frontier.accepts(next_inst);
+        if (does_commute) {
+          sub_commutation_vect[index].insert(next_inst, wire);
+          frontier.add(next_inst);
+        } else {
+          ++index;
+          frontier.reset(next_inst);
+          OperationGroup next;
+          next.insert(next_inst, wire);
+          sub_commutation_vect.emplace_back(std::move(next));
         }
         op = next_inst;
       }else{
@@ -369,13 +330,23 @@ std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, in
   }
 }
 
-int find_controled_index(const CommutationGroupIndex &groups,
-mlir::quantum::ValueSemanticsInstOp key,const std::vector<std::pair<std::string, int64_t>> &wire_site){
-  return groups.at(wire_site.back()).at(key.getOperation());
+// Modified 2026-11-19: construct once per read-only classification phase.
+// Looking through every group for every two-qubit gate is quadratic even
+// without copying the groups. Retain the first occurrence, as the old scan did.
+using CommutationIndex = std::map<std::pair<std::string, int64_t>,
+                                  llvm::DenseMap<mlir::Operation *, int>>;
+int find_controled_index(const CommutationIndex &groups,
+    mlir::quantum::ValueSemanticsInstOp key,
+    const std::vector<std::pair<std::string, int64_t>> &wire_site) {
+  if (wire_site.empty()) return -1;
+  auto wire = groups.find(wire_site.back());
+  if (wire == groups.end()) return -1;
+  auto op = wire->second.find(key.getOperation());
+  return op == wire->second.end() ? -1 : op->second;
 }
 
-void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const CommutationGroupIndex &groups,
-  std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cx,std::pair<std::string, int64_t> &wire){
+void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const CommutationIndex &commutation_set,
+  std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cx,std::pair<std::string, int64_t> &wire, const WireTable &hashTable){
   std::vector<std::vector<std::pair<std::string, int64_t>>> qbits_index;
   std::vector<std::pair<std::string, int64_t>> current_index;
   std::vector<std::pair<std::string, int64_t>> another_index;
@@ -389,23 +360,23 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const Co
     temp_ops.clear();
     auto op = vect[i];
     // current_index = OP::getbit_from_muti_valueSemanticsInstOp(op);
-    auto number1 = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-    current_index = hashTable[number1];
+    current_index = hashTable.find(op.getOperation())->second;
 
     if(current_index.front() != wire || dealed[i] == 0){
       continue;
     }
-    index = find_controled_index(groups,op,current_index);
+    index = find_controled_index(commutation_set,op,current_index);
+    if (index < 0) continue;
     dealed[i] = 0;
     temp_ops.emplace_back(op);
     for(int j = i+1;j < vect.size();j++){
       auto op_2 = vect[j];
       // another_index = OP::getbit_from_muti_valueSemanticsInstOp(op_2);
-      auto number2 = op_2.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-      another_index = hashTable[number2];
+      another_index = hashTable.find(op_2.getOperation())->second;
 
       if(another_index == current_index){
-        new_index = find_controled_index(groups,op_2,another_index);
+        new_index = find_controled_index(commutation_set,op_2,another_index);
+        if (new_index < 0) break;
         if(new_index == index){
           temp_ops.emplace_back(op_2);
           dealed[j] = 0;
@@ -413,9 +384,7 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const Co
           break;
         }
       }else{
-        // All entries in vect already commute on the control wire. A gate
-        // with another target must not hide a later identical cancellable CX.
-        continue;
+        break;
       }
     }
 
@@ -425,12 +394,12 @@ void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const Co
   }
 }
 
-void classification(const CommutationGroupIndex &groups,
-std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>> &vect,
+void classification(const CommutationIndex &commutation_set,
+std::vector<OperationGroup> &vect,
 std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &h,std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &y,
 std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &z,std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &x,
 std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cx,std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>>&cy,
-std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std::string, int64_t> wire){
+std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std::string, int64_t> wire, const WireTable &hashTable){
 
   std::vector<mlir::quantum::ValueSemanticsInstOp> cx_gate;//["cx", "cy", "cz", "h", "y"]
   std::vector<mlir::quantum::ValueSemanticsInstOp> cy_gate;
@@ -440,20 +409,8 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
   std::vector<mlir::quantum::ValueSemanticsInstOp> z_rotation;//["p", "z", "u1", "rz", "t", "s"]
   std::vector<mlir::quantum::ValueSemanticsInstOp> x_rotation;//["rx", "x"]
 
-  std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> node_wire;
-  mlir::quantum::ValueSemanticsInstOp tmp_op;
-  for(auto &sub_vec: vect){
-    node_wire.emplace_back(sub_vec.getKeys());
-    // BiMap iterates by operation address, not circuit order. Rewiring a run
-    // in that order can create a cycle or erase an operation still in use.
-    auto &ordered = node_wire.back();
-    std::sort(ordered.begin(), ordered.end(), [](auto lhs, auto rhs) {
-      return lhs->template getAttrOfType<mlir::IntegerAttr>("number").getInt() <
-             rhs->template getAttrOfType<mlir::IntegerAttr>("number").getInt();
-    });
-  }
-
-  for(int index = 0;index < node_wire.size();index++){
+  for (const auto &group : vect) {
+    const auto &members = group.getKeys();
     h_gate.clear();
     y_gate.clear();
     z_rotation.clear();
@@ -461,10 +418,10 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
     cx_gate.clear();
     cy_gate.clear();
     cz_gate.clear();
-    if(node_wire[index].size() <= 1){
+    if(members.size() <= 1){
       continue;
     }
-    for(auto &tmp_op: node_wire[index]){
+    for(auto tmp_op: members){
       if(tmp_op.name() == "h"){
         h_gate.emplace_back(tmp_op);
       }else if(tmp_op.name() == "y"){
@@ -483,13 +440,13 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
       }
     }
     if(cx_gate.size() > 1){
-      deal_2gates(cx_gate,groups,cx,wire);
+      deal_2gates(cx_gate,commutation_set,cx,wire,hashTable);
     }
     if(cy_gate.size() > 1){
-      deal_2gates(cy_gate,groups,cy,wire);
+      deal_2gates(cy_gate,commutation_set,cy,wire,hashTable);
     }
     if(cz_gate.size() > 1){
-      deal_2gates(cz_gate,groups,cz,wire);
+      deal_2gates(cz_gate,commutation_set,cz,wire,hashTable);
     }
     if(h_gate.size() > 1){
       h.emplace_back(h_gate);
@@ -506,9 +463,9 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
   }
 }
 
-double total_angle(const std::vector<mlir::quantum::ValueSemanticsInstOp> &ops){
+double total_angle(std::vector<mlir::quantum::ValueSemanticsInstOp> ops){
   double total_angle = 0,current_angle = 0;
-  for(auto op : ops){
+  for(auto &op : ops){
     if(op.name() == "p"||op.name() == "u1"||op.name() == "rz"||op.name() == "rx"){
       current_angle = qllvm::OP::tryGetConstAngle(op.getOperand(1));
     }else if(op.name() == "z"||op.name() == "x"){
@@ -612,13 +569,12 @@ void delete_gate(std::vector<mlir::quantum::ValueSemanticsInstOp> &dead,std::str
   }
 }
 
-void deal_topop(const std::vector<mlir::quantum::ValueSemanticsInstOp> &topop,const std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> &hash_Table,
+void deal_topop(const std::vector<mlir::quantum::ValueSemanticsInstOp> &topop,const WireTable &hash_Table,
                 std::vector<mlir::quantum::ValueSemanticsInstOp> &top_op,std::vector<std::pair<std::string, int64_t>> &wireset,
               const std::unordered_map<std::string, int> &qbitseq){
   std::vector<std::pair<std::string, int64_t>> idex_two;
   for(auto op : topop){
-    int number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("number")).getInt();
-    const auto &temp1 = hash_Table.at(number);
+    const auto &temp1 = hash_Table.find(op.getOperation())->second;
     if(op == topop.front()){
       top_op.emplace_back(op);
       if(op.getNumResults() == 1){
@@ -701,11 +657,21 @@ void deal_topop(const std::vector<mlir::quantum::ValueSemanticsInstOp> &topop,co
 }
 
 void CommutativeCancellationPass::runOnOperation() {
+  std::unordered_map<std::string, int> qbit_seq;
+  std::vector<Wire> wire_set;
+  WireTable hashTable;
+  const bool trace = std::getenv("QLLVM_COMMUTATION_STATS");
+  auto lastPhase = std::chrono::steady_clock::now();
+  auto phase = [&](const char *name) {
+    if (!trace) return;
+    auto now = std::chrono::steady_clock::now();
+    llvm::errs() << "[qllvm-commutation-phase] " << name << "="
+                 << std::chrono::duration<double>(now - lastPhase).count() << "s\n";
+    lastPhase = now;
+  };
   // std::cout << "CommutativeCancellationPass:  " << std::endl;
   // gen_qasm(getOperation(),"before.qasm");
   // getOperation().dump();
-  qbit_seq.clear();
-  hashTable.clear();
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cx;//["cx", "cy", "cz", "h", "y"]
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cy;
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> cz;
@@ -715,9 +681,8 @@ void CommutativeCancellationPass::runOnOperation() {
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> z;//["p", "z", "u1", "rz", "t", "s"]
 
   std::vector<mlir::quantum::ValueSemanticsInstOp> top_op; 
-  std::vector<std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>>> commutation_set;
-  std::vector<BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>>> sub_commutation_vect;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> commutation_ops;
+  std::vector<std::vector<OperationGroup>> commutation_set;
+  std::vector<OperationGroup> sub_commutation_vect;
   std::vector<std::pair<std::string, int64_t>> idex_two;
   std::pair<std::string, int64_t> idex_one;
   int counts =0;
@@ -726,23 +691,32 @@ void CommutativeCancellationPass::runOnOperation() {
     qbit_seq.emplace(op.name().str(),counts++);
   });
 
-  counts = 0;
-  getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    idex_two.clear();
-    mlir::OpBuilder rewriter(op);
-    op.getOperation()->setAttr(llvm::StringRef("number"),mlir::IntegerAttr::get(rewriter.getI32Type(), counts));
-    if(op.getNumResults() == 1){
-      idex_one = OP::getbit_from_valueSemanticsInstOp(op);
-      idex_two.emplace_back(idex_one);
-    }else if(op.getNumResults() == 2){
-      idex_two = OP::getbit_from_muti_valueSemanticsInstOp(op);
-    }
-    hashTable[counts] = idex_two;
-    counts++;
-  });
-
   topop.clear();
-  circuit::getGateCountAndTopOp(before_gate_count, topop, getOperation());
+  {
+    OP::QuantumWireResolver wires;
+    getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
+      idex_two.clear();
+      if(op.getNumResults() == 1){
+        idex_one = wires.resolve(op.qubits()[0]);
+        idex_two.emplace_back(idex_one);
+      }else if(op.getNumResults() == 2){
+        for (auto value : op.qubits()) idex_two.push_back(wires.resolve(value));
+      }
+      hashTable.insert({op.getOperation(), idex_two});
+      // Same roots as getGateCountAndTopOp, without resetting every depth
+      // attribute when the default pipeline does not request statistics.
+      for (size_t operand = 0; operand < op.getNumResults(); ++operand) {
+        if (!dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(op.getOperand(operand).getDefiningOp())) {
+          topop.push_back(op);
+          if (operand == 0) break;
+        }
+      }
+    });
+  } // Discard the wire cache before any SSA rewrite.
+
+  if (printCountAndDepth || syn)
+    circuit::getGateCountAndTopOp(before_gate_count, topop, getOperation());
+  phase("wire-index");
   if(printCountAndDepth||syn){
     int depth = 0;
     if (*c_d==0){
@@ -766,35 +740,45 @@ void CommutativeCancellationPass::runOnOperation() {
   i = 0;
   std::pair<std::string, int64_t> wire;
   commutation_set.clear();
+  {
+  CommutationAnalysis analysis(hashTable);
   for(auto &op : top_op){
     index = 0;
-    commutation_ops.clear();
-    commutation_ops.emplace_back(op);
     sub_commutation_vect.clear();
-    BiMap<mlir::quantum::ValueSemanticsInstOp, std::pair<std::string, int64_t>> sub_commutation;
+    OperationGroup sub_commutation;
     wire = wire_set[i];
     sub_commutation.insert(op,wire);
-    sub_commutation_vect.emplace_back(sub_commutation);
-    findcommutativegate(op,commutation_ops,sub_commutation_vect,wire,index);
-    commutation_set.emplace_back(sub_commutation_vect);
+    sub_commutation_vect.emplace_back(std::move(sub_commutation));
+    findcommutativegate(op,sub_commutation_vect,wire,index,analysis,hashTable);
+    commutation_set.emplace_back(std::move(sub_commutation_vect));
     i++;
   }
 
-  CommutationGroupIndex groups;
-  for (size_t w = 0; w < commutation_set.size(); ++w) {
-    auto &wireGroups = groups[wire_set[w]];
-    for (size_t g = 0; g < commutation_set[w].size(); ++g)
-      for (auto op : commutation_set[w][g].getKeys())
-        wireGroups.emplace(op.getOperation(), static_cast<int>(g));
+  if (std::getenv("QLLVM_COMMUTATION_STATS"))
+    llvm::errs() << "[qllvm-commutation] family_probes=" << analysis.familyProbes
+                 << " matrix_checks=" << analysis.matrixChecks
+                 << " cache_hits=" << analysis.cacheHits << "\n";
+  } // Destroy all analysis caches before rewriting SSA.
+
+  phase("grouping");
+  CommutationIndex groupIndex;
+  for (size_t wire = 0; wire < commutation_set.size(); ++wire) {
+    if (groupIndex.count(wire_set[wire])) continue;
+    auto &indexByOperation = groupIndex[wire_set[wire]];
+    for (size_t group = 0; group < commutation_set[wire].size(); ++group)
+      for (auto op : commutation_set[wire][group].getKeys())
+        indexByOperation.insert({op.getOperation(), static_cast<int>(group)});
   }
 
   i = 0;
+
   for(auto &vect:commutation_set){
     wire = wire_set[i];
-    classification(groups,vect,h,y,z,x,cx,cy,cz,wire);
+    classification(groupIndex,vect,h,y,z,x,cx,cy,cz,wire,hashTable);
     i++;
   }
 
+  phase("classification");
   std::string name;
   name = "rz";
   for(auto& vect : z){
@@ -844,6 +828,7 @@ void CommutativeCancellationPass::runOnOperation() {
     }
   }
 
+  phase("rewrite");
   if(printCountAndDepth||syn){
     circuit::getGateCountAndTopOp(after_gate_count, topop, getOperation());
     int depth = 0;
