@@ -147,7 +147,9 @@ void RemoveUnusedQIRCallsPass::runOnOperation() {
     // QallocOp returns a qubit array, if it
     // only has one user, then that user must be
     // the dealloc op, so we can remove both of them
+    if (op->hasAttr("qllvm.preserve_for_qasm")) return;
     auto qubits = op.qubits();
+    if (!qubits.hasOneUse()) return;
     auto next_op = (*qubits.user_begin());
     if (dyn_cast_or_null<mlir::quantum::DeallocOp>(next_op) &&
         qubits.hasOneUse()) {

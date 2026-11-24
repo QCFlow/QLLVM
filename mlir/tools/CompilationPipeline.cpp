@@ -193,6 +193,14 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   mlir::MLIRContext& context = *(mlir_gen_result.mlir_context);
   std::vector<std::string>& unique_function_names = mlir_gen_result.unique_function_names;
 
+  // Modified 2026-11-24: QASM is an exported circuit with declared wires,
+  // including idle wires and identity circuits. Keep its original allocation
+  // extents through cleanup so later registers cannot be renumbered.
+  if (opts.emitBackend == "qasm-backend")
+    (*module).walk([&](mlir::quantum::QallocOp op) {
+      op->setAttr("qllvm.preserve_for_qasm", mlir::UnitAttr::get(&context));
+    });
+
   std::string fname = stemFromPath(opts.inputFile);
 
   // module->dump();
