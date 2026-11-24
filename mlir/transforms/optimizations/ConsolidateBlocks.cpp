@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <cstdio>
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/DenseMap.h"
 #include <limits>
 
 namespace qllvm {
@@ -54,133 +55,60 @@ void ConsolidateBlocks::getDependentDialects(DialectRegistry &registry) const {
   registry.insert<LLVM::LLVMDialect>();
 }
 
-std::unordered_map<std::string, int> qbit_vect;
-std::unordered_map<int, std::vector<std::pair<std::string, int64_t>>> hashTableindex;
-std::unordered_set<std::string> basic_gateset;
+// Modified 2026-11-24: temporary analysis belongs to this pass invocation.
+// No operation attributes or process-global tables carry collection state.
+struct BlockCollectionState {
+  using Wire = std::pair<std::string, int64_t>;
+  std::unordered_map<std::string, int> registers;
+  llvm::DenseMap<mlir::Operation *, std::vector<Wire>> wires;
+  llvm::DenseMap<mlir::Operation *, size_t> order;
+  llvm::DenseSet<mlir::Operation *> selected, traversedSingles;
+  const std::unordered_set<std::string> &basis;
+  explicit BlockCollectionState(const std::unordered_set<std::string> &basis)
+      : basis(basis) {}
+};
 
-// Original block operations already have stable physical-wire identities in
-// this pass's table. Synthesized operations have no location tag and must be
-// resolved from their current operands instead.
 static std::vector<std::pair<std::string, int64_t>> blockWires(
-    mlir::quantum::ValueSemanticsInstOp op) {
-  if (auto location = op->getAttrOfType<mlir::IntegerAttr>("location")) {
-    auto found = hashTableindex.find(location.getInt());
-    if (found != hashTableindex.end()) return found->second;
-  }
+    BlockCollectionState &state, mlir::quantum::ValueSemanticsInstOp op) {
+  auto found = state.wires.find(op.getOperation());
+  if (found != state.wires.end()) return found->second;
   return OP::getbit_from_muti_valueSemanticsInstOp(op);
 }
 
 // calculate the matrix of single-qubit or two-qubit quantum gate block
-Eigen::MatrixXcd totalMat(std::vector<mlir::quantum::ValueSemanticsInstOp> &blocks){
-  int current_bit = 0;
-  int total_bit = 0;
-  bool Positive;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> block;
-  block = blocks;
-
-  reverse(block.begin(),block.end());
-
-  Eigen::MatrixXcd id_op = Eigen::MatrixXcd::Identity(2, 2);
-  Eigen::MatrixXcd total_mat;
-  Eigen::MatrixXcd current_mat;
-  Eigen::MatrixXcd temp1;
-  Eigen::MatrixXcd temp2;
-
-  std::vector<std::pair<std::string, int64_t>> total_qbits_index;
-  std::vector<std::pair<std::string, int64_t>> current_qbits_index;
-  std::pair<std::string, int64_t> index_1qbits;
-
-  for(auto &op : block){
-    current_bit = op.getNumResults();
-    auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-    current_qbits_index = hashTableindex[number];
-    if(current_bit > 1){
-      // current_qbits_index = OP::getbit_from_muti_valueSemanticsInstOp(op);
-      Positive = qllvm::matrix::ForwardOrReverse(current_qbits_index,qbit_vect);
-      if(Positive){
-        current_mat = qllvm::matrix::getGateMat(op,0);
-      }else{
-        current_mat = qllvm::matrix::getGateMat(op,1);
-      }
-    }else{
-      current_mat = qllvm::matrix::getGateMat(op,0);
-      // index_1qbits = OP::getbit_from_valueSemanticsInstOp(op);
-      index_1qbits = current_qbits_index.front();
-    }
-
-    if(op == block.front())
-    {
-      total_mat = current_mat;
-      total_bit = current_bit;
-      if(current_bit == 1){
-        total_qbits_index.emplace_back(index_1qbits);
-      }else{
-        if(!Positive){
-          total_qbits_index.emplace_back(current_qbits_index.back());
-          total_qbits_index.emplace_back(current_qbits_index.front());
-        }else{
-          total_qbits_index = current_qbits_index;
-        }
-      }  
-    }else{
-      if(current_bit == total_bit){
-        if(current_bit == 2){
-          total_mat = total_mat * current_mat;
-        }else if(current_bit == 1){
-          total_qbits_index.emplace_back(index_1qbits);
-          if(index_1qbits == total_qbits_index.front()){
-            total_mat = total_mat * current_mat;
-            total_qbits_index.pop_back();
-          }else{
-            auto if_positive = qllvm::matrix::ForwardOrReverse(total_qbits_index,qbit_vect);
-            if(if_positive){
-              temp1 = Eigen::kroneckerProduct(id_op,total_mat);
-              temp2 = Eigen::kroneckerProduct(current_mat,id_op);
-              total_mat = temp1 * temp2;
-              total_bit = 2;
-            }else{
-              temp1 = Eigen::kroneckerProduct(total_mat,id_op);
-              temp2 = Eigen::kroneckerProduct(id_op,current_mat);
-              total_mat = temp1 * temp2;
-              total_bit = 2;
-              total_qbits_index.pop_back();
-              total_qbits_index.insert(total_qbits_index.begin(),index_1qbits);
-            }
-          }
-            
-        }
-      }else if(current_bit < total_bit){
-        if(index_1qbits == total_qbits_index.front()){
-          // temp1 = Eigen::kroneckerProduct(current_mat,id_op);
-          temp1 = Eigen::kroneckerProduct(id_op,current_mat);
-        }else{
-          temp1 = Eigen::kroneckerProduct(current_mat,id_op);
-          // temp1 = Eigen::kroneckerProduct(id_op,current_mat);
-        }
-        total_mat = total_mat * temp1;
-      }else if(current_bit > total_bit){
-        index_1qbits = total_qbits_index.front();
-        total_qbits_index.clear();
-        if(!Positive){
-          total_qbits_index.emplace_back(current_qbits_index.back());
-          total_qbits_index.emplace_back(current_qbits_index.front());
-        }else{
-          total_qbits_index = current_qbits_index;
-        }
-
-        if(total_qbits_index.front() == index_1qbits){
-          // temp1 = Eigen::kroneckerProduct(total_mat,id_op);
-          temp1 = Eigen::kroneckerProduct(id_op,total_mat);
-        }else{
-          // temp1 = Eigen::kroneckerProduct(id_op,total_mat);
-          temp1 = Eigen::kroneckerProduct(total_mat,id_op);
-        }
-        total_bit = 2;
-        total_mat = temp1 * current_mat;
-      }
+Eigen::MatrixXcd totalMat(std::vector<mlir::quantum::ValueSemanticsInstOp> &blocks) {
+  // The public single-wire helper is also used by target-specific lowering;
+  // it must not depend on an earlier pass's location attributes or tables.
+  if (std::all_of(blocks.begin(), blocks.end(), [](auto op) {
+        return op.getNumResults() == 1;
+      })) {
+    Eigen::Matrix2cd accumulated = Eigen::Matrix2cd::Identity();
+    for (auto it = blocks.rbegin(); it != blocks.rend(); ++it)
+      accumulated = accumulated * matrix::getGateMat(*it, 0);
+    return accumulated;
+  }
+  std::vector<std::pair<std::string, int64_t>> support;
+  std::vector<std::vector<std::pair<std::string, int64_t>>> wires;
+  OP::QuantumWireResolver resolver;
+  for (auto op : blocks) {
+    wires.emplace_back();
+    for (auto value : op.qubits()) {
+      auto wire = resolver.resolve(value);
+      wires.back().push_back(wire);
+      if (std::find(support.begin(), support.end(), wire) == support.end())
+        support.push_back(wire);
     }
   }
-  return total_mat;
+  if (support.size() > 2) throw std::runtime_error("Local matrix support exceeds two wires");
+  std::sort(support.begin(), support.end());
+  Eigen::MatrixXcd accumulated = Eigen::MatrixXcd::Identity(1 << support.size(), 1 << support.size());
+  for (size_t i = 0; i < blocks.size(); ++i) {
+    std::vector<size_t> axes;
+    for (const auto &wire : wires[i])
+      axes.push_back(std::distance(support.begin(), std::find(support.begin(), support.end(), wire)));
+    accumulated = matrix::embedLocalUnitary(matrix::getGateMat(blocks[i], 0), axes, support.size()) * accumulated;
+  }
+  return accumulated;
 }
 
 //   find the single-qubit quantum gate block
@@ -235,7 +163,7 @@ void find_runs(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_run,
         if (auto next_inst = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(user)) {
           if (next_inst.name() == "reset" || next_inst.name() == "mz" ||
               next_inst->getBlock() != op_t->getBlock()) return;
-          if(next_inst.getNumResults() == 1){    
+          if(next_inst.getNumResults() == 1){
             if(firstVisit(next_inst)){
               current_run.emplace_back(next_inst);
               op_t = next_inst;
@@ -251,24 +179,24 @@ void find_runs(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_run,
       }else{
         return;
       }
-    } 
+    }
   }
-  
+
 }
 
-bool judge_same_index(std::vector<std::pair<std::string, int64_t>> index_block,std::vector<mlir::quantum::ValueSemanticsInstOp> &sideop,mlir::quantum::ValueSemanticsInstOp &op,int owner_user){
+bool judge_same_index(BlockCollectionState &state,std::vector<std::pair<std::string, int64_t>> index_block,std::vector<mlir::quantum::ValueSemanticsInstOp> &sideop,mlir::quantum::ValueSemanticsInstOp &op,int owner_user){
   /*
   index_block: the index of the block
   op: the current quantum gate
   sideop: the outermost quantum gate
   owner_user:  owner_user = 0 the leftmost, owner_user = 1 the rightmost
-  */ 
-  
+  */
+
   mlir::quantum::ValueSemanticsInstOp tmp_op;
-  mlir::quantum::ValueSemanticsInstOp tmp_op2; 
+  mlir::quantum::ValueSemanticsInstOp tmp_op2;
 
   // to ensure that the gate does not appear in different blocks
-  if(op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("selected")).getInt()){
+  if(state.selected.count(op.getOperation())){
     return false;
   }
   // Modified for correctness: reset/measurement are unitary-block boundaries.
@@ -281,12 +209,11 @@ bool judge_same_index(std::vector<std::pair<std::string, int64_t>> index_block,s
   // the current is a two-qubit quantum gate
   if(op.getNumResults() == 2){
     // get the index of the current quantum gate
-    auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-    auto index = hashTableindex[number];
+    auto index = blockWires(state, op);
     // find the position of the original quantum gate index in the current quantum gate index
     auto it1 = std::find(index_block.begin(), index_block.end(), index.front());
     auto it2 = std::find(index_block.begin(), index_block.end(), index.back());
-    
+
     // the index of the current quantum gate is the same as the index of the block
     if(it1 != index_block.end() && it2 != index_block.end()){
       tmp_op = sideop.front();
@@ -332,7 +259,7 @@ bool judge_same_index(std::vector<std::pair<std::string, int64_t>> index_block,s
 }
 
 void update_sizeop(std::vector<mlir::quantum::ValueSemanticsInstOp> &sideop,mlir::quantum::ValueSemanticsInstOp &op,int owner_user){
- 
+
   mlir::quantum::ValueSemanticsInstOp tmp_op;
   mlir::quantum::ValueSemanticsInstOp tmp_op2;
 
@@ -413,7 +340,7 @@ void update_sizeop(std::vector<mlir::quantum::ValueSemanticsInstOp> &sideop,mlir
 
 }
 
-void find_blocks(std::vector<mlir::quantum::ValueSemanticsInstOp> &current_block, 
+void find_blocks(BlockCollectionState &state,std::vector<mlir::quantum::ValueSemanticsInstOp> &current_block,
 mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64_t>> &total_index,std::vector<mlir::quantum::ValueSemanticsInstOp> &sideop,
                       int owner_or_user){
   std::vector<mlir::quantum::ValueSemanticsInstOp> list_owner;
@@ -437,7 +364,7 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
         }else{
           list_owner.clear();
           list_owner.emplace_back(owner);
-          find_runs(list_owner,owner,0);
+          find_runs(list_owner,owner,0,&state.traversedSingles);
           all_owner.emplace_back(list_owner);
         }
       }
@@ -446,10 +373,9 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
       return;
     }
     if(num == 2){
-      auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-      auto current_qbits_index = hashTableindex[number];
+      auto current_qbits_index = blockWires(state, op);
 
-      bool Positive = qllvm::matrix::ForwardOrReverse(current_qbits_index,qbit_vect);
+      bool Positive = qllvm::matrix::ForwardOrReverse(current_qbits_index,state.registers);
       if(!Positive){
         reverse(all_owner.begin(),all_owner.end());
       }
@@ -461,7 +387,7 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
     int i = 0;
     for(auto &owner_list: all_owner){
       auto owner = owner_list.front();
-      if(judge_same_index(total_index,sideop,owner,0)){
+      if(judge_same_index(state,total_index,sideop,owner,0)){
         if(i == 0){
           tmp_op1 = owner;
           i++;
@@ -470,18 +396,17 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
         }
         current_block.insert(current_block.begin(),owner_list.begin(),owner_list.end());
         for(auto &op1:owner_list){
-          mlir::OpBuilder rewriter(op1);
-          op1.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
+          state.selected.insert(op1.getOperation());
         }
 
         update_sizeop(sideop,owner,0);
       }
     }
-    
+
     if(tmp_op1 != NULL && tmp_op2 == NULL){
-      find_blocks(current_block,tmp_op1,total_index,sideop,0);
+      find_blocks(state,current_block,tmp_op1,total_index,sideop,0);
     }else if(tmp_op1 != NULL && tmp_op2 != NULL && sideop.size() == 1){
-      find_blocks(current_block,tmp_op2,total_index,sideop,0);
+      find_blocks(state,current_block,tmp_op2,total_index,sideop,0);
     }else if(tmp_op1 != NULL && tmp_op2 != NULL && sideop.size() == 2){
       auto operand = tmp_op1.getOperand(0);
       auto operation = operand.dyn_cast_or_null<mlir::OpResult>().getOwner();
@@ -490,12 +415,12 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
       auto operation2 = operand2.dyn_cast_or_null<mlir::OpResult>().getOwner();
       auto owner2 = dyn_cast_or_null<mlir::quantum::ValueSemanticsInstOp>(operation2);
       if(owner != NULL && owner2 != NULL){
-        if(judge_same_index(total_index,sideop,owner,0) && judge_same_index(total_index,sideop,owner2,0)){
-          find_blocks(current_block,tmp_op1,total_index,sideop,0);
+        if(judge_same_index(state,total_index,sideop,owner,0) && judge_same_index(state,total_index,sideop,owner2,0)){
+          find_blocks(state,current_block,tmp_op1,total_index,sideop,0);
         }
       }
     }
-    
+
   }else if(owner_or_user == 1){
     std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> all_user;
     tmp_op1 = NULL;
@@ -519,7 +444,7 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
           }else{
             list_owner.clear();
             list_owner.emplace_back(next_inst);
-            find_runs(list_owner,next_inst,1);
+            find_runs(list_owner,next_inst,1,&state.traversedSingles);
             all_user.emplace_back(list_owner);
           }
         }
@@ -530,10 +455,9 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
     }
 
     if(num == 2){
-      auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-      auto current_qbits_index = hashTableindex[number];
+      auto current_qbits_index = blockWires(state, op);
 
-      bool Positive = qllvm::matrix::ForwardOrReverse(current_qbits_index,qbit_vect);
+      bool Positive = qllvm::matrix::ForwardOrReverse(current_qbits_index,state.registers);
       if(!Positive){
         reverse(all_user.begin(),all_user.end());
       }
@@ -546,8 +470,8 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
     for(auto &user_list: all_user){
       auto user = user_list.front();
 
-      if(judge_same_index(total_index,sideop,user,1)){
-      
+      if(judge_same_index(state,total_index,sideop,user,1)){
+
         if(i == 0){
           tmp_op1 = user_list.back();
           i++;
@@ -556,18 +480,17 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
         }
         current_block.insert(current_block.end(),user_list.begin(),user_list.end());
         for(auto &op1:user_list){
-          mlir::OpBuilder rewriter(op1);
-          op1.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
+          state.selected.insert(op1.getOperation());
         }
         user = user_list.back();
         update_sizeop(sideop,user,1);
       }
     }
 
-    if(tmp_op1 != NULL && tmp_op2 == NULL){ 
-      find_blocks(current_block,tmp_op1,total_index,sideop,1);
+    if(tmp_op1 != NULL && tmp_op2 == NULL){
+      find_blocks(state,current_block,tmp_op1,total_index,sideop,1);
     }else if(tmp_op1 != NULL && tmp_op2 != NULL && sideop.size() == 1){
-      find_blocks(current_block,tmp_op2,total_index,sideop,1);
+      find_blocks(state,current_block,tmp_op2,total_index,sideop,1);
     }else if(tmp_op1 != NULL && tmp_op2 != NULL && sideop.size() == 2){
       auto return_value = *tmp_op1.result().begin();
       auto return_value2 = *tmp_op2.result().begin();
@@ -583,8 +506,8 @@ mlir::quantum::ValueSemanticsInstOp &op,std::vector<std::pair<std::string, int64
       }
 
       if(next_inst != NULL && next_inst2 != NULL){
-        if(judge_same_index(total_index,sideop,next_inst,1) && judge_same_index(total_index,sideop,next_inst2,1)){
-          find_blocks(current_block,tmp_op1,total_index,sideop,1);
+        if(judge_same_index(state,total_index,sideop,next_inst,1) && judge_same_index(state,total_index,sideop,next_inst2,1)){
+          find_blocks(state,current_block,tmp_op1,total_index,sideop,1);
         }
       }
     }
@@ -634,7 +557,7 @@ static std::string oneQubitMatrixKey(const Eigen::Matrix2cd &matrix) {
     }
   return key;
 }
-void del_1q_sequence(std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps, OneQubitSynthesisCache &cache){
+void del_1q_sequence(BlockCollectionState &state,std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps, OneQubitSynthesisCache &cache){
    /*
   run: the collection of single-qubit quantum gate blocks
   deadOps: the collection of gates to be deleted
@@ -644,22 +567,22 @@ void del_1q_sequence(std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::
   // calculate the matrix form of the single-qubit quantum gate block
   std::vector<std::string> basis_names = {};
 
-  if(basic_gateset.size() > 0){
+  if(state.basis.size() > 0){
     basis_names.clear();
-    if(basic_gateset.find("rz") != basic_gateset.end() && basic_gateset.find("ry") != basic_gateset.end()){
+    if(state.basis.find("rz") != state.basis.end() && state.basis.find("ry") != state.basis.end()){
         basis_names.emplace_back("ZYZ");
     }
-    if(basic_gateset.find("rx") != basic_gateset.end() && basic_gateset.find("ry") != basic_gateset.end()){
+    if(state.basis.find("rx") != state.basis.end() && state.basis.find("ry") != state.basis.end()){
         basis_names.emplace_back("XYX");
     }
-    if(basic_gateset.find("rz") != basic_gateset.end() && basic_gateset.find("rx") != basic_gateset.end()){
+    if(state.basis.find("rz") != state.basis.end() && state.basis.find("rx") != state.basis.end()){
         basis_names.emplace_back("ZXZ");
         basis_names.emplace_back("XZX");
     }
-    if(basic_gateset.find("sx") != basic_gateset.end() && basic_gateset.find("x") != basic_gateset.end()){
+    if(state.basis.find("sx") != state.basis.end() && state.basis.find("x") != state.basis.end()){
         basis_names.emplace_back("ZSXX");
     }
-    if(basic_gateset.find("rz") != basic_gateset.end() && basic_gateset.find("sx") != basic_gateset.end()){
+    if(state.basis.find("rz") != state.basis.end() && state.basis.find("sx") != state.basis.end()){
         basis_names.emplace_back("ZSX");
     }
   }
@@ -734,172 +657,6 @@ void del_1q_sequence(std::vector<mlir::quantum::ValueSemanticsInstOp> &run,std::
   }
 }
 
-std::vector<mlir::quantum::ValueSemanticsInstOp> find_first_last(std::vector<mlir::quantum::ValueSemanticsInstOp> &blocks,
-std::vector<std::pair<std::string, int64_t>> &index,int i){
-  std::pair<std::string, int64_t> index_1q;
-  std::vector<std::pair<std::string, int64_t>> current_index;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> op_to_use;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> block;
-  block = blocks;
-  bool Positive;
-  if(i == 1){
-    reverse(block.begin(),block.end());
-  }
-
-  index.clear();
-  mlir::quantum::ValueSemanticsInstOp op = block.front();
-  op_to_use.emplace_back(op);
-
-  if(op.getNumResults() == 2){
-    auto number = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-    current_index = hashTableindex[number];
-    Positive = qllvm::matrix::ForwardOrReverse(current_index,qbit_vect);
-    if(Positive){
-      index = current_index;
-    }else{
-      index.emplace_back(current_index.back());
-      index.emplace_back(current_index.front());
-    }
-    return op_to_use;
-  }else{
-    index_1q = blockWires(op).front();
-    index.emplace_back(index_1q);
-  }
-
-  for(auto &elem : block){
-    // one single-qubit quantum gate, one two-qubit quantum gate, first store the single-qubit quantum gate, then store the two-qubit quantum gate
-    if(elem.getNumResults() == 2){
-      auto number = elem.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-      current_index = hashTableindex[number];
-      index.clear();
-      Positive = qllvm::matrix::ForwardOrReverse(current_index,qbit_vect);
-      if(Positive){
-        index = current_index;
-      }else{
-        index.emplace_back(current_index.back());
-        index.emplace_back(current_index.front());
-      }
-      op_to_use.emplace_back(elem);
-      break;
-    }else{
-      // two single-qubit gates, store in first in order
-      index_1q = blockWires(elem).front();
-      if(index_1q != index.front()){
-        index.emplace_back(index_1q);
-        Positive = qllvm::matrix::ForwardOrReverse(index,qbit_vect);
-        if(Positive){
-          op_to_use.emplace_back(elem);
-        }else{
-          index.pop_back();
-          index.insert(index.begin(),index_1q);
-          op_to_use.insert(op_to_use.begin(),elem);
-        }
-        break;
-      }
-    }
-  }
-  return op_to_use;
-}
-
-void find_input_param(std::vector<mlir::quantum::ValueSemanticsInstOp> &first,
-std::vector<std::pair<std::string, int64_t>> &index_front,mlir::Value &inputQubit0,mlir::Value &inputQubit1){
-  // find the input parameters of the block
-  std::pair<std::string, int64_t> index_of_1q;
-  std::vector<std::pair<std::string, int64_t>> index_of_2q;
-  std::pair<std::string, int64_t> index_of_1q1;
-  std::pair<std::string, int64_t> index_of_1q2;
-  auto first_1op = &first.front();
-  auto first_2op = &first.back();
-  auto number = (first.front()).getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-  auto number2 = (first.back()).getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-  
-  if(first.size() == 1){
-    index_of_2q = hashTableindex[number];
-    if(index_of_2q == index_front){
-      inputQubit0 = first_1op->getOperand(0);
-      inputQubit1 = first_1op->getOperand(1);
-    }else{
-      inputQubit0 = first_1op->getOperand(1);
-      inputQubit1 = first_1op->getOperand(0);
-    }
-  }else{
-    if(first.front().getNumResults() == 1 && first.back().getNumResults() == 1){
-      index_of_1q1 = blockWires(first.front()).front();
-      index_of_1q2 = blockWires(first.back()).front();
-      inputQubit0 = first_1op->getOperand(0);
-      inputQubit1 = first_2op->getOperand(0);
-    }else{
-      auto first_op = first.front();
-      index_of_1q1 = (hashTableindex[number]).front();
-      index_of_2q = hashTableindex[number2];
-      if(index_of_2q == index_front){
-        if(index_of_1q1 == index_front.front()){
-          inputQubit0 = first_1op->getOperand(0);
-          inputQubit1 = first_2op->getOperand(1);
-        }else{
-          inputQubit0 = first_2op->getOperand(0);
-          inputQubit1 = first_1op->getOperand(0);
-        }  
-      }else{
-        if(index_of_1q == index_front.front()){
-          inputQubit0 = first_1op->getOperand(0);
-          inputQubit1 = first_2op->getOperand(0);
-        }else{
-          inputQubit0 = first_2op->getOperand(1);
-          inputQubit1 = first_1op->getOperand(0);
-        }
-      }
-      
-    }
-  }
-}
-
-
-// sort the two gates according to the output qubits
-void find_op(std::vector<mlir::quantum::ValueSemanticsInstOp> &lasts,std::vector<std::pair<std::string, int64_t>> &index_back,
-mlir::quantum::ValueSemanticsInstOp &last0,mlir::quantum::ValueSemanticsInstOp &last1){
-  std::vector<mlir::quantum::ValueSemanticsInstOp> last;
-  last = lasts;
-  
-  auto last_1op = last.front();
-  auto last_2op = last.back();
-
-  auto number1 = last_1op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-  auto number2 = last_2op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("location")).getInt();
-
-  if(last.size() == 1){
-    last0 = last_1op;
-    last1 = last_1op;
-    return;
-  }else if(last.front().getNumResults() == 1 && last.back().getNumResults() == 1){
-    last0 = last_1op;
-    last1 = last_2op;
-    return;
-  }else{
-    auto index_of_1q = (hashTableindex[number1]).front();
-    auto index_of_2q = hashTableindex[number2];
-    auto Positive = qllvm::matrix::ForwardOrReverse(index_of_2q,qbit_vect);
-    if(!Positive){
-      if(index_of_1q == index_back.back()){
-        last0 = last_2op;
-        last1 = last_1op;
-      }else{
-        last0 = last_1op;
-        last1 = last_2op;
-      }
-    }else{
-      if(index_of_1q == index_back.front()){
-        last0 = last_1op;
-        last1 = last_2op;
-      }else{
-        last0 = last_2op;
-        last1 = last_1op;
-      }      
-    }
-  }
-}
-
-// create a new quantum gate
 void creat_new_gate(mlir::quantum::ValueSemanticsInstOp &op, mlir::Value inputQubit0,mlir::Value inputQubit1,
 mlir::Type qubit_type,std::vector<qllvm::kak::TMP_OP> &tmp,mlir::Value &outputQubit0,
 mlir::Value &outputQubit1,std::vector<std::pair<std::string, int64_t>> index_front){
@@ -1023,7 +780,7 @@ static std::string exactMatrixKey(const Eigen::MatrixXcd &matrix) {
 // Modified 2026-11-22: resynthesize only a closed, straight-line SSA region.
 // Every external use must be a final wire output after the insertion point.
 // In particular, measurements and resets cannot become hidden interior uses.
-void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidate,
+void kak_decompose_u3(BlockCollectionState &state,std::vector<mlir::quantum::ValueSemanticsInstOp> &candidate,
                      std::vector<mlir::quantum::ValueSemanticsInstOp> &deadOps,
                      SynthesisCache &synthesisCache) {
   if (candidate.size() <= 1) return;
@@ -1033,12 +790,11 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   using Wire = std::pair<std::string, int64_t>;
   std::vector<Wire> support;
   for (auto op : block) {
-    auto selected = op->getAttrOfType<mlir::IntegerAttr>("selected");
     if (op->getBlock() != parent || op.name() == "mz" || op.name() == "reset" ||
         op->getParentOfType<mlir::quantum::CtrlURegion>() ||
-        (selected && selected.getInt()) || !members.insert(op.getOperation()).second)
+        state.selected.count(op.getOperation()) || !members.insert(op.getOperation()).second)
       return;
-    for (const auto &wire : blockWires(op))
+    for (const auto &wire : blockWires(state, op))
       if (std::find(support.begin(), support.end(), wire) == support.end())
         support.push_back(wire);
   }
@@ -1051,7 +807,7 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   Eigen::MatrixXcd current = Eigen::Matrix4cd::Identity();
   int oldTwoQubit = 0;
   for (auto op : block) {
-    auto wires = blockWires(op);
+    auto wires = blockWires(state, op);
     if (wires.size() != op.getNumResults() || wires.empty() || wires.size() > 2)
       return;
     std::vector<size_t> axes;
@@ -1076,7 +832,7 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   }
   auto anchor = block.back();
   for (auto op : block) {
-    auto wires = blockWires(op);
+    auto wires = blockWires(state, op);
     for (size_t j = 0; j < wires.size(); ++j) {
       size_t axis = std::distance(support.begin(),
                                 std::find(support.begin(), support.end(), wires[j]));
@@ -1092,7 +848,7 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   qllvm::kak::KAK::SynthesisResult result;
   if (found != synthesisCache.end()) result = found->second;
   else {
-    result = qllvm::kak::KAK().expand(current, {0, 1}, basic_gateset);
+    result = qllvm::kak::KAK().expand(current, {0, 1}, state.basis);
     if (synthesisCache.size() < 4096) synthesisCache.emplace(key, result);
   }
   if (!result) return;
@@ -1112,23 +868,20 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   outputs[0].replaceAllUsesWith(replacement0);
   outputs[1].replaceAllUsesWith(replacement1);
   for (auto op : block) {
-    mlir::OpBuilder builder(op);
-    op->setAttr("selected", builder.getI32IntegerAttr(1));
+    state.selected.insert(op.getOperation());
     deadOps.push_back(op);
   }
 }
 
 void ConsolidateBlocks::runOnOperation() {
-  qbit_vect.clear();
-  hashTableindex.clear();
+  BlockCollectionState state(basic_gate);
   int counts =0;
 
-  basic_gateset = basic_gate;
 
   getOperation().walk([&](mlir::quantum::QallocOp op) {
-    qbit_vect.emplace(op.name().str(),counts++);
+    state.registers.emplace(op.name().str(),counts++);
   });
-  
+
   std::vector<std::pair<std::string, int64_t>> idex_two;
   std::pair<std::string, int64_t> idex_one;
   int loc = 0;
@@ -1136,18 +889,15 @@ void ConsolidateBlocks::runOnOperation() {
     OP::QuantumWireResolver wires;
     getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
       idex_two.clear();
-      mlir::OpBuilder rewriter(op);
-      op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
-      op.getOperation()->setAttr(llvm::StringRef("onebit"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
-      op.getOperation()->setAttr(llvm::StringRef("location"),mlir::IntegerAttr::get(rewriter.getI32Type(), loc));
-    
+      state.order[op.getOperation()] = loc;
+
       if(op.getNumResults() == 1){
         idex_one = wires.resolve(op.qubits()[0]);
         idex_two.emplace_back(idex_one);
       }else if(op.getNumResults() == 2){
         for (auto value : op.qubits()) idex_two.push_back(wires.resolve(value));
       }
-      hashTableindex[loc] = idex_two;
+      state.wires[op.getOperation()] = idex_two;
       loc++;
     });
   } // No cached SSA values survive into block resynthesis.
@@ -1182,42 +932,38 @@ void ConsolidateBlocks::runOnOperation() {
       find_runs(current_run,op,0,&visitedSingles);
       find_runs(current_run,op,1,&visitedSingles);
       runs.emplace_back(current_run);
-    } 
+    }
   });
 
   visitedSingles.clear();
 
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    int selected = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("selected")).getInt();
-    mlir::OpBuilder rewriter(op);
+    int selected = state.selected.count(op.getOperation());
     if(op.getNumResults() == 2 && selected == 0 &&
        !op->getParentOfType<mlir::quantum::CtrlURegion>()){
-      op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 1));
+      state.selected.insert(op.getOperation());
       std::vector<mlir::quantum::ValueSemanticsInstOp> sideop;
       current_block.clear();
       current_block.emplace_back(op);
       sideop.emplace_back(op);
       // This collection phase has not changed SSA wiring since the lookup
       // table above was built; avoid tracing every wire back to its allocation.
-      total_index = hashTableindex.at(op->getAttrOfType<mlir::IntegerAttr>("location").getInt());
-      find_blocks(current_block,op,total_index,sideop,0);
+      total_index = blockWires(state, op);
+      find_blocks(state,current_block,op,total_index,sideop,0);
       sideop.clear();
       sideop.emplace_back(op);
-      find_blocks(current_block,op,total_index,sideop,1);
+      find_blocks(state,current_block,op,total_index,sideop,1);
       blocks.emplace_back(current_block);
-    }  
+    }
   });
 
 
-  getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    mlir::OpBuilder rewriter(op);
-    op.getOperation()->setAttr(llvm::StringRef("selected"),mlir::IntegerAttr::get(rewriter.getI32Type(), 0));
-  });
+  state.selected.clear();
 
   deadOps.clear();
   SynthesisCache synthesisCache;
   for(auto &elem:blocks){
-    kak_decompose_u3(elem,deadOps,synthesisCache);
+    kak_decompose_u3(state,elem,deadOps,synthesisCache);
   }
 
   // The SSA block walk stops when a single-qubit gate sits on the other
@@ -1232,25 +978,12 @@ void ConsolidateBlocks::runOnOperation() {
     // Keep nonunitary/controlled gates in the wire index as boundaries.
     // Omitting them can create a long candidate that the SSA-closure guard
     // must reject in full, losing valid segments on either side.
-    auto location = op->getAttrOfType<mlir::IntegerAttr>("location");
-    auto selectedAttr = op->getAttrOfType<mlir::IntegerAttr>("selected");
-    if (!location || !selectedAttr || selectedAttr.getInt()) return;
+    if (!state.order.count(op.getOperation()) || state.selected.count(op.getOperation())) return;
     if (deleted.count(op.getOperation())) return;
     ordered.emplace_back(op);
   });
-  std::sort(ordered.begin(), ordered.end(),
-            [](mlir::quantum::ValueSemanticsInstOp lhs,
-               mlir::quantum::ValueSemanticsInstOp rhs) {
-              auto left = lhs.getOperation()
-                              ->getAttrOfType<mlir::IntegerAttr>(
-                                  llvm::StringRef("location"))
-                              .getInt();
-              auto right = rhs.getOperation()
-                               ->getAttrOfType<mlir::IntegerAttr>(
-                                   llvm::StringRef("location"))
-                               .getInt();
-              return left < right;
-            });
+  // walk order matches the original monotonically assigned locations;
+  // no attribute writes or subsequent sorting are needed.
   // Index each wire once. Walking the merge of the two support lists visits
   // exactly the same relevant gates as the old full suffix scan, in order,
   // without repeatedly traversing disjoint wires. Preserve taken-gate handling
@@ -1258,16 +991,14 @@ void ConsolidateBlocks::runOnOperation() {
   using Wire = std::pair<std::string, int64_t>;
   std::map<Wire, std::vector<size_t>> positions;
   for (size_t i = 0; i < ordered.size(); ++i) {
-    const auto &wires = hashTableindex.at(
-        ordered[i]->getAttrOfType<mlir::IntegerAttr>("location").getInt());
+    const auto &wires = state.wires.find(ordered[i].getOperation())->second;
     for (const auto &wire : wires) positions[wire].push_back(i);
   }
   std::vector<char> taken(ordered.size(), 0);
   for (size_t i = 0; i < ordered.size(); ++i) {
     if (taken[i] || ordered[i].getNumResults() != 2 ||
         ordered[i]->getParentOfType<mlir::quantum::CtrlURegion>()) continue;
-    auto pair = hashTableindex.at(
-        ordered[i]->getAttrOfType<mlir::IntegerAttr>("location").getInt());
+    auto pair = state.wires.find(ordered[i].getOperation())->second;
     if (pair.size() != 2) continue;
     std::vector<mlir::quantum::ValueSemanticsInstOp> pairBlock;
     const auto &firstPositions = positions.at(pair[0]);
@@ -1283,8 +1014,7 @@ void ConsolidateBlocks::runOnOperation() {
       if (taken[j] || ordered[j]->getBlock() != ordered[i]->getBlock() ||
           ordered[j].name() == "mz" || ordered[j].name() == "reset" ||
           ordered[j]->getParentOfType<mlir::quantum::CtrlURegion>()) break;
-      auto qs = hashTableindex.at(
-          ordered[j]->getAttrOfType<mlir::IntegerAttr>("location").getInt());
+      auto qs = state.wires.find(ordered[j].getOperation())->second;
       bool touches = false, outside = false;
       for (const auto &qubit : qs) {
         if (qubit == pair[0] || qubit == pair[1]) touches = true;
@@ -1301,7 +1031,7 @@ void ConsolidateBlocks::runOnOperation() {
     if (entanglers >= 2) {
       if (synthesis::allowDiagnostic())
         llvm::errs() << "pair n=" << pairBlock.size() << " e=" << entanglers << "\n";
-      kak_decompose_u3(pairBlock, deadOps, synthesisCache);
+      kak_decompose_u3(state,pairBlock, deadOps, synthesisCache);
     }
   }
   OneQubitSynthesisCache oneQubitCache;
@@ -1314,14 +1044,14 @@ void ConsolidateBlocks::runOnOperation() {
       continue;
     }
     for(auto &op: run){
-       selected = op.getOperation()->getAttrOfType<mlir::IntegerAttr>(llvm::StringRef("selected")).getInt();
+       selected = state.selected.count(op.getOperation());
        if(selected){
         stop = 1;
         break;
        }
     }
     if(stop == 0){
-      del_1q_sequence(run,deadOps,oneQubitCache);
+      del_1q_sequence(state,run,deadOps,oneQubitCache);
     }
   }
   for(auto &op : deadOps){

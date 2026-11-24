@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 import random
+import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +13,32 @@ import test_qllvm_parser_regression as parser_tests
 
 @unittest.skipUnless(os.environ.get('QLLVM_TEST_COMPILER'), 'Set QLLVM_TEST_COMPILER')
 class BlockCollectionTests(unittest.TestCase):
+    def test_collection_state_is_not_written_to_the_ir(self):
+        c=QuantumCircuit(3)
+        for k in range(6):
+            c.rx(.13*k,0);c.cx(0,1);c.rz(.23,1);c.cx(1,2)
+        result,text=parser_tests.ParserRegressionTests.compile(self,qasm2.dumps(c),'O1',45,
+            ['-mlir-disable-threading','-emitmlir'])
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('MLIR',result.stdout)
+        self.assertIsNone(re.search(r'\b(?:selected|onebit|location)\s*=',result.stdout))
+        after=qasm2.loads(text,custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
+        self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-7,rtol=0))
+
+    def test_target_u3_lowering_does_not_depend_on_collection_metadata(self):
+        c=QuantumCircuit(3)
+        c.rx(.27,2);c.rz(-.37,2);c.cx(2,0);c.ry(.43,0);c.rx(-.21,0)
+        with tempfile.TemporaryDirectory() as tmp:
+            source,output=Path(tmp)/'in.qasm',Path(tmp)/'out.qasm'
+            source.write_text(qasm2.dumps(c))
+            done=subprocess.run([os.environ['QLLVM_TEST_COMPILER'],str(source),'-O1',
+                '-mlir-disable-threading','-emit-backend=qasm-backend','-basicgate=[u3,cz]',
+                '-output-path='+str(output)],capture_output=True,text=True,timeout=45)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            after=qasm2.load(str(output),custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
+        self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-7,rtol=0))
+        self.assertLessEqual(set(after.count_ops()),{'u3','cz'})
+
     def test_identity_block_removes_both_outputs_without_numerical_synthesis(self):
         c=QuantumCircuit(4)
         c.h(2)
