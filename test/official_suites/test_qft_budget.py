@@ -13,6 +13,29 @@ from qiskit.quantum_info import Operator
 
 @unittest.skipUnless(os.environ.get('QLLVM_TEST_COMPILER'), 'Set QLLVM_TEST_COMPILER')
 class QFTBudgetTests(unittest.TestCase):
+    def test_parity_phase_gadget_deletion_spends_one_certified_budget(self):
+        c=QuantumCircuit(2)
+        c.cx(0,1);c.rz(8e-7,1);c.cx(0,1)
+        compiled,budget=self.compile(c)
+        self.assertEqual(sum(i.operation.num_qubits==2 for i in compiled.data),0)
+        self.assertGreater(budget['charged_upper_bound'],0)
+        self.assert_bound(c,compiled,budget)
+        exact,strict=self.compile(c,exact=True)
+        self.assertEqual(sum(i.operation.num_qubits==2 for i in exact.data),2)
+        self.assertEqual(strict['charged_upper_bound'],0)
+
+    def test_canonical_phase_and_overlapping_gadgets_keep_the_budget(self):
+        for u3 in (False,True):
+            c=QuantumCircuit(3)
+            for k in range(16):
+                c.cx(k%2,2)
+                if u3:c.u(0,0,1e-8,2)
+                else:c.rz(1e-8,2)
+                c.cx(k%2,2)
+            compiled,budget=self.compile(c)
+            self.assertEqual(sum(i.operation.num_qubits==2 for i in compiled.data),0)
+            self.assert_bound(c,compiled,budget)
+
     def compile(self, circuit, exact=False, custom=False):
         with tempfile.TemporaryDirectory() as directory:
             d = Path(directory)

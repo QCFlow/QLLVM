@@ -35,6 +35,7 @@
 #include "mlir/Target/LLVMIR.h"
 #include "openqasmv3_mlir_generator.hpp"
 #include "pass_manager.hpp"
+#include "optimizations/PhaseGadgetRemovalPass.hpp"
 #include "qllvm-mlir-helper.hpp"
 #include "qllvm/BackendOptions.hpp"
 #include "qllvm/BackendRegistry.hpp"
@@ -244,6 +245,10 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     turn_to_u3 = true;
   }
   
+  const char *disablePhaseGadgets = std::getenv("QLLVM_DISABLE_PHASE_GADGETS");
+  if (opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
+      !(disablePhaseGadgets && std::string(disablePhaseGadgets) == "1"))
+    pm.addPass(std::make_unique<qllvm::PhaseGadgetRemovalPass>());
   pm.addPass(std::make_unique<qllvm::DecomposemultiPass>());
   if (opts.optLevel == 0){
     pm.addPass(std::make_unique<qllvm::Check_gate>());
