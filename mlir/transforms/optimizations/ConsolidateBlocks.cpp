@@ -12,6 +12,7 @@
  * that they have been altered from the originals.
  */
 #include "utils/mutation_tracking.hpp"
+#include "utils/depth_transfer.hpp"
 #include "ConsolidateBlocks.hpp"
 #include "gen_qasm.hpp"
 #include "Quantum/QuantumOps.h"
@@ -807,6 +808,8 @@ void kak_decompose_u3(BlockCollectionState &state,std::vector<mlir::quantum::Val
   mlir::Value inputs[2], outputs[2];
   Eigen::MatrixXcd current = Eigen::Matrix4cd::Identity();
   int oldTwoQubit = 0;
+  DepthTransfer oldDepth;
+  bool nativeOld = !state.basis.empty();
   for (auto op : block) {
     auto wires = blockWires(state, op);
     if (wires.size() != op.getNumResults() || wires.empty() || wires.size() > 2)
@@ -829,6 +832,8 @@ void kak_decompose_u3(BlockCollectionState &state,std::vector<mlir::quantum::Val
     }
     auto local = matrix::getGateMat(op, 0);
     current = matrix::embedLocalUnitary(local, axes, 2) * current;
+    oldDepth.append(axes);
+    nativeOld &= state.basis.count(op.name().str()) != 0;
     oldTwoQubit += wires.size() == 2;
   }
   auto anchor = block.back();
@@ -853,9 +858,21 @@ void kak_decompose_u3(BlockCollectionState &state,std::vector<mlir::quantum::Val
   if (!result) return;
   auto &gates = *result;
   int newTwoQubit = 0;
-  for (const auto &gate : gates) newTwoQubit += gate.indexs.size() == 2;
+  DepthTransfer newDepth;
+  bool nativeNew = !state.basis.empty();
+  for (const auto &gate : gates) {
+    newTwoQubit += gate.indexs.size() == 2;
+    std::vector<size_t> axes(gate.indexs.begin(), gate.indexs.end());
+    newDepth.append(axes);
+    nativeNew &= state.basis.count(gate.name) != 0;
+  }
+  // Preserve the entangler/total-gate priorities. For equal native counts,
+  // accept only a depth improvement valid for EVERY pair of input times,
+  // rather than assuming both wires reach this block simultaneously.
+  const bool depthBetter = nativeOld && nativeNew && gates.size() == block.size() &&
+                           newDepth.strictlyDominates(oldDepth);
   const bool accept = newTwoQubit < oldTwoQubit ||
-      (newTwoQubit == oldTwoQubit && gates.size() < block.size());
+      (newTwoQubit == oldTwoQubit && (gates.size() < block.size() || depthBetter));
   if (oldTwoQubit >= 2 && synthesis::allowDiagnostic())
     llvm::errs() << "kak block=" << block.size() << " tmp=" << gates.size()
                  << " old2=" << oldTwoQubit << " new2=" << newTwoQubit
