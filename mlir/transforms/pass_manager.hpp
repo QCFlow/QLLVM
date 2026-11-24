@@ -13,6 +13,7 @@
 #pragma once
 #include "mlir/Dialect/Affine/Passes.h"
 #include "optimizations/IdentityPairRemovalPass.hpp"
+#include "optimizations/LocalCleanupPass.hpp"
 #include "optimizations/RemoveUnusedQIRCallsPass.hpp"
 #include "optimizations/SimplifyQubitExtractPass.hpp"
 #include "optimizations/SingleQubitGateMergingPass.hpp"
@@ -108,9 +109,12 @@ struct DefaultOptimizationLoopPass
     for (unsigned round = 0; round < 4; ++round) {
       OpPassManager pipeline(getOperation()->getName().getStringRef());
       pipeline.addPass(std::make_unique<RemoveIdentityEquivalent>());
-      pipeline.addPass(std::make_unique<SingleQubitIdentityPairRemovalPass>());
-      pipeline.addPass(std::make_unique<CNOTIdentityPairRemovalPass>());
-      pipeline.addPass(std::make_unique<DuplicateResetRemovalPass>());
+      const char *legacyCleanup = std::getenv("QLLVM_LEGACY_LOCAL_CLEANUP");
+      if (legacyCleanup && std::string(legacyCleanup) == "1") {
+        pipeline.addPass(std::make_unique<SingleQubitIdentityPairRemovalPass>());
+        pipeline.addPass(std::make_unique<CNOTIdentityPairRemovalPass>());
+        pipeline.addPass(std::make_unique<DuplicateResetRemovalPass>());
+      } else pipeline.addPass(std::make_unique<LocalCleanupPass>());
       pipeline.addPass(std::make_unique<remove_diagonal_gates_before_measure>());
       pipeline.addPass(std::make_unique<CommutativeCancellationPass>());
       pipeline.addPass(std::make_unique<RemoveIdentityEquivalent>());
