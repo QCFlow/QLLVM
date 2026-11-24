@@ -67,6 +67,32 @@ class CommutationRegressionTests(unittest.TestCase):
         circuit.cx(1, 0)  # Reversing control and target changes commutation.
         self.assert_unitary(circuit)
 
+    def test_identical_entanglers_cancel_across_other_commuting_supports(self):
+        for gate in ('cx','cy','cz'):
+            for edges in [((0,1),(0,2)),((0,2),(1,2))]:
+                with self.subTest(gate=gate,edges=edges):
+                    c=QuantumCircuit(3)
+                    for pair in (edges[0],edges[1],edges[0]):getattr(c,gate)(*pair)
+                    # CY is first lowered to Sdg/CX/S; the first scan folds
+                    # its inverse phases, the second exposes the CX pair.
+                    after=self.compile(c,sequence='2\n2\n' if gate=='cy' else '2\n')
+                    self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-8,rtol=0))
+                    self.assertEqual(after.count_ops().get('cz',0),1)
+
+    def test_other_wire_commutation_boundary_blocks_cancellation(self):
+        for middle in [('cx',(1,2)),('cx',(1,0)),('cz',(1,2))]:
+            with self.subTest(middle=middle):
+                c=QuantumCircuit(3);c.cx(0,1)
+                getattr(c,middle[0])(*middle[1]);c.cx(0,1)
+                after=self.assert_unitary(c)
+                self.assertEqual(after.count_ops().get('cz',0),3)
+
+    def test_interleaved_many_supports_preserve_parity_and_order(self):
+        c=QuantumCircuit(5)
+        for target in (1,2,3,4,1,3,2,4,2):c.cx(0,target)
+        after=self.assert_unitary(c)
+        self.assertEqual(after.count_ops().get('cz',0),1)
+
     def test_unique_angle_diagonal_group_and_noncommuting_boundary(self):
         circuit = QuantumCircuit(2)
         for i in range(1200):

@@ -30,6 +30,7 @@
 #include <cassert>
 #include "utils/circuit.hpp"
 #include "utils/get_matrix.hpp"
+#include <tuple>
 #include "utils/local_unitary.hpp"
 #include "gen_qasm.hpp"
 #include "utils/op.hpp"
@@ -182,6 +183,11 @@ public:
     const bool diagonalA = a.axis == Axis::Z || (a.axis == Axis::None && a.diagonal);
     const bool diagonalB = b.axis == Axis::Z || (b.axis == Axis::None && b.diagonal);
     if (diagonalA && diagonalB) return true;
+    // Same-axis controlled Paulis commute for a shared control or shared
+    // target. Reversed/chain operands are deliberately excluded.
+    if (wa.size() == 2 && wb.size() == 2 && op1.name() == op2.name() &&
+        (op1.name() == "cx" || op1.name() == "cy") &&
+        (wa[0] == wb[0] || wa[1] == wb[1])) return true;
     auto controlled = [](Axis axis, const auto &singleWire, auto gate, const auto &wires) {
       if (axis == Axis::None || wires.size() != 2) return false;
       if (gate == "cx" || gate == "cy") {
@@ -347,51 +353,26 @@ int find_controled_index(const CommutationIndex &groups,
 
 void deal_2gates(std::vector<mlir::quantum::ValueSemanticsInstOp> &vect,const CommutationIndex &commutation_set,
   std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cx,std::pair<std::string, int64_t> &wire, const WireTable &hashTable){
-  std::vector<std::vector<std::pair<std::string, int64_t>>> qbits_index;
-  std::vector<std::pair<std::string, int64_t>> current_index;
-  std::vector<std::pair<std::string, int64_t>> another_index;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> deadop1;
-  std::vector<mlir::quantum::ValueSemanticsInstOp> temp_ops;
-  std::vector<int> dealed(vect.size(),1);
-  int new_index;
-  int index;
-
-  for(int i = 0;i < vect.size();i++){
-    temp_ops.clear();
-    auto op = vect[i];
-    // current_index = OP::getbit_from_muti_valueSemanticsInstOp(op);
-    current_index = hashTable.find(op.getOperation())->second;
-
-    if(current_index.front() != wire || dealed[i] == 0){
-      continue;
-    }
-    index = find_controled_index(commutation_set,op,current_index);
-    if (index < 0) continue;
-    dealed[i] = 0;
-    temp_ops.emplace_back(op);
-    for(int j = i+1;j < vect.size();j++){
-      auto op_2 = vect[j];
-      // another_index = OP::getbit_from_muti_valueSemanticsInstOp(op_2);
-      another_index = hashTable.find(op_2.getOperation())->second;
-
-      if(another_index == current_index){
-        new_index = find_controled_index(commutation_set,op_2,another_index);
-        if (new_index < 0) break;
-        if(new_index == index){
-          temp_ops.emplace_back(op_2);
-          dealed[j] = 0;
-        }else{
-          break;
-        }
-      }else{
-        break;
-      }
-    }
-
-    if(temp_ops.size() > 1){
-      cx.emplace_back(temp_ops);
-    }
+  // Modified 2026-11-24: membership in this wire's commutation group
+  // already proves that intervening operations commute. Bucket identical
+  // ordered supports by the OTHER wire's group as well, rather than stopping
+  // at the first commuting gate on a different target/control. Both wire
+  // groups are required; shared control alone never licenses a rewrite.
+  using Key = std::tuple<Wire, Wire, int>;
+  std::map<Key, size_t> indices;
+  std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> candidates;
+  for (auto op : vect) {
+    const auto &support = hashTable.find(op.getOperation())->second;
+    if (support.size() != 2 || support.front() != wire) continue;
+    const int otherGroup = find_controled_index(commutation_set, op, support);
+    if (otherGroup < 0) continue;
+    Key key{support[0], support[1], otherGroup};
+    auto entry = indices.emplace(key, candidates.size());
+    if (entry.second) candidates.emplace_back();
+    candidates[entry.first->second].push_back(op);
   }
+  for (auto &candidate : candidates)
+    if (candidate.size() > 1) cx.push_back(std::move(candidate));
 }
 
 void classification(const CommutationIndex &commutation_set,
@@ -427,7 +408,7 @@ std::vector<std::vector<mlir::quantum::ValueSemanticsInstOp>> &cz,std::pair<std:
       }else if(tmp_op.name() == "y"){
         y_gate.emplace_back(tmp_op);
       }else if(tmp_op.name()=="p"||tmp_op.name()=="z"||tmp_op.name()=="u1"||
-              tmp_op.name()=="rz"||tmp_op.name()=="t"||tmp_op.name()=="s"){  
+              tmp_op.name()=="rz"||tmp_op.name()=="t"||tmp_op.name()=="s"||tmp_op.name()=="tdg"||tmp_op.name()=="sdg"){
         z_rotation.emplace_back(tmp_op);
       }else if(tmp_op.name()=="rx"||tmp_op.name()=="x"){
         x_rotation.emplace_back(tmp_op);
@@ -474,6 +455,10 @@ double total_angle(std::vector<mlir::quantum::ValueSemanticsInstOp> ops){
       current_angle = llvm::numbers::pi/4;
     }else if(op.name() == "s"){
       current_angle = llvm::numbers::pi/2;
+    }else if(op.name() == "tdg"){
+      current_angle = -llvm::numbers::pi/4;
+    }else if(op.name() == "sdg"){
+      current_angle = -llvm::numbers::pi/2;
     }
     total_angle += current_angle;
   }
