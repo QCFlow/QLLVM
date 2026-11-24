@@ -42,3 +42,11 @@ class LinearReversibleTests(unittest.TestCase):
         c.cx(0,1);c.cx(1,2);c.measure(0,0)
         after=self.compile(c)
         self.assertEqual(verify_instrument(c,after,tolerance=1e-8)['status'],'passed')
+
+    def test_many_windows_on_deep_wires_preserve_boundary_mappings(self):
+        c=QuantumCircuit(4)
+        for _ in range(1600):
+            for edge in ((0,1),(1,2),(0,1),(1,2)):c.cx(*edge)
+            c.rz(.37,2);c.cx(2,3);c.rx(.21,0)
+        after=self.compile(c)
+        self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-7,rtol=0))

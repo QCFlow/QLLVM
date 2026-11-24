@@ -8,15 +8,16 @@
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/DenseMap.h"
 
 namespace qllvm {
 struct LinearReversiblePass
     : public mlir::PassWrapper<LinearReversiblePass,mlir::OperationPass<mlir::ModuleOp>> {
   using Gate=mlir::quantum::ValueSemanticsInstOp;
   using Wire=std::pair<std::string,int64_t>;
-  void optimize(std::vector<Gate> &gates) {
+  using WireTable=llvm::DenseMap<mlir::Operation *,std::array<Wire,2>>;
+  void optimize(std::vector<Gate> &gates,const WireTable &wireTable) {
     if(gates.size()<3)return;
-    OP::QuantumWireResolver resolver;
     std::vector<Wire> support;
     std::vector<std::array<unsigned,2>> axes;
     llvm::DenseSet<mlir::Operation *> members;
@@ -24,7 +25,7 @@ struct LinearReversiblePass
     for(auto gate:gates){
       std::array<unsigned,2> local;
       for(unsigned i=0;i<2;++i){
-        const auto wire=resolver.resolve(gate.getOperand(i));
+        const auto &wire=wireTable.find(gate.getOperation())->second[i];
         auto found=std::find(support.begin(),support.end(),wire);
         if(found==support.end()){support.push_back(wire);found=support.end()-1;}
         local[i]=std::distance(support.begin(),found);
@@ -75,29 +76,34 @@ struct LinearReversiblePass
         std::vector<std::vector<Gate>> windows;
         std::vector<Gate> current;
         std::vector<Wire> support;
-        OP::QuantumWireResolver resolver;
+        WireTable wireTable;
         auto flush=[&](){if(!current.empty())windows.push_back(std::move(current));current.clear();support.clear();};
+        {
+        OP::QuantumWireResolver resolver;
         for(auto &operation:block){
           auto gate=mlir::dyn_cast<Gate>(&operation);
           if(!gate||gate.name()!="cx"||gate.getNumResults()!=2){
             if(!mlir::isa<mlir::ConstantOp,mlir::quantum::ExtractQubitOp>(&operation))flush();
             continue;
           }
+          std::array<Wire,2> resolved{{resolver.resolve(gate.getOperand(0)),resolver.resolve(gate.getOperand(1))}};
+          wireTable[gate.getOperation()]=resolved;
           std::vector<Wire> next=support;
-          for(auto value:gate.qubits()){
-            auto wire=resolver.resolve(value);
+          for(const auto &wire:resolved){
             if(std::find(next.begin(),next.end(),wire)==next.end())next.push_back(wire);
           }
           if(next.size()>3||current.size()==64){
             flush();next.clear();
-            for(auto value:gate.qubits())next.push_back(resolver.resolve(value));
+            next.assign(resolved.begin(),resolved.end());
           }
           support=std::move(next);current.push_back(gate);
         }
         flush();
-        // Collection is read-only. Each replacement then builds a fresh wire
-        // resolver so no stale SSA cache survives a preceding window rewrite.
-        for(auto &window:windows)optimize(window);
+        } // Discard the SSA resolver before rewriting. Only wire names/indices remain.
+        // Original operation descriptors stay valid for disjoint windows;
+        // replacements preserve each logical wire's boundary mapping. Avoid
+        // re-tracing a deep circuit prefix separately for every short window.
+        for(auto &window:windows)optimize(window,wireTable);
       }
     });
   }
