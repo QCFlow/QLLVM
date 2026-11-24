@@ -10,6 +10,7 @@
  *
  * Modified by QCFlow (2026) for QLLVM project.
  *******************************************************************************/
+#include "utils/mutation_tracking.hpp"
 #include "RemoveIdentityEquivalent.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -108,6 +109,7 @@ void RemoveIdentityEquivalent::runOnOperation() {
 
   for (auto &op : deadOps) {
       op->dropAllUses();
+      optimization::markChanged();
       op.erase();
   }
 } // namespace qllvm

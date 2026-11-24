@@ -11,6 +11,7 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+#include "utils/mutation_tracking.hpp"
 #include "remove_diagonal_gates_before_measure.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -176,6 +177,7 @@ void remove_diagonal_gates_before_measure::runOnOperation() {
     
     for (auto &op1 : deadOps) {
         op1->dropAllUses();
+        optimization::markChanged();
         op1.erase();
     }
   }

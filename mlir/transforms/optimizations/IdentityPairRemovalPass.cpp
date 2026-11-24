@@ -11,6 +11,7 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+#include "utils/mutation_tracking.hpp"
 #include "IdentityPairRemovalPass.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -85,6 +86,7 @@ void SingleQubitIdentityPairRemovalPass::runOnOperation() {
 
   for (auto &op : deadOps) {
     op->dropAllUses();
+    optimization::markChanged();
     op.erase();
   }
   if(printCountAndDepth||syn){
@@ -218,6 +220,7 @@ void CNOTIdentityPairRemovalPass::runOnOperation() {
 
   for (auto &op : deadOps) {
     op->dropAllUses();
+    optimization::markChanged();
     op.erase();
   }
 
@@ -308,6 +311,7 @@ void DuplicateResetRemovalPass::runOnOperation() {
 
   for (auto &op : deadOps) {
     op->dropAllUses();
+    optimization::markChanged();
     op.erase();
   }
   if(printCountAndDepth||syn){

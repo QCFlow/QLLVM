@@ -34,6 +34,7 @@
 #include "optimizations/InputStatePreambleOptimization.hpp"
 #include "optimizations/turn_to_phasedx.hpp"
 #include "optimizations/utils/round_snapshot.hpp"
+#include "optimizations/utils/mutation_tracking.hpp"
 #include <cstdlib>
 #include <optional>
 
@@ -87,9 +88,9 @@ struct PassManagerStats {
   int passes_count[N] = {0};
 };
 
-// Modified 2026-11-21: stop only on an exactly unchanged complete IR state.
-// Large snapshots fall back to the original four rounds. Custom schedules are
-// still executed by the existing path, without convergence decisions.
+// Modified 2026-11-24: all default rewriting passes report actual mutation.
+// Retain bounded snapshots as a diagnostic audit and the fixed-round schedule
+// as a reference; the production path does not copy the whole IR every round.
 struct DefaultOptimizationLoopPass
     : public PassWrapper<DefaultOptimizationLoopPass, OperationPass<ModuleOp>> {
   std::unordered_set<std::string> basis;
@@ -98,14 +99,12 @@ struct DefaultOptimizationLoopPass
   DefaultOptimizationLoopPass(std::unordered_set<std::string> basis, bool trace)
       : basis(std::move(basis)), trace(trace) {}
   void runOnOperation() final {
-    // The fixed schedule remains available for controlled comparisons.
     const char *fixed = std::getenv("QLLVM_FIXED_OPT_ROUNDS");
-    bool tracking = !(fixed && std::string(fixed) == "1");
+    const bool tracking = !(fixed && std::string(fixed) == "1");
+    const char *auditOption = std::getenv("QLLVM_AUDIT_MUTATIONS");
+    const bool audit = auditOption && std::string(auditOption) == "1";
     std::optional<OptimizationRoundSnapshot> before;
-    if (tracking) {
-      before.emplace(getOperation());
-      if (!before->complete) {tracking = false;before.reset();}
-    }
+    if (audit) before.emplace(getOperation());
     for (unsigned round = 0; round < 4; ++round) {
       OpPassManager pipeline(getOperation()->getName().getStringRef());
       pipeline.addPass(std::make_unique<RemoveIdentityEquivalent>());
@@ -120,19 +119,26 @@ struct DefaultOptimizationLoopPass
       if (!basis.empty()) pipeline.addPass(std::make_unique<trans_basicgate>(basis));
       if (basis.empty()) pipeline.addPass(std::make_unique<SingleQubitGateMergingPass>());
       else pipeline.addPass(std::make_unique<SingleQubitGateMergingPass>(basis));
-      if (failed(runPipeline(pipeline,getOperation()))) {
-        signalPassFailure();return;
+      bool changed = false;
+      {
+        optimization::MutationScope mutations(changed);
+        if (failed(runPipeline(pipeline,getOperation()))) {
+          signalPassFailure();return;
+        }
       }
-      bool unchanged = false;
-      if (tracking) {
+      bool unchanged = tracking && !changed;
+      if (audit) {
         OptimizationRoundSnapshot after(getOperation());
-        unchanged = before->unchanged(after);
-        if (!after.complete) {tracking = false;before.reset();}
-        else before = std::move(after);
+        if (unchanged && before->complete && after.complete && !before->unchanged(after)) {
+          llvm::errs() << "[qllvm-round] mutation-audit-mismatch\n";
+          signalPassFailure();return;
+        }
+        before = std::move(after);
       }
       if (trace)
         llvm::errs() << "[qllvm-round] round=" << round+1
-                     << " tracked=" << tracking << " unchanged=" << unchanged << "\n";
+                     << " tracked=" << tracking << " unchanged=" << unchanged
+                     << " changed=" << changed << " audited=" << audit << "\n";
       if (unchanged) break;
     }
   }

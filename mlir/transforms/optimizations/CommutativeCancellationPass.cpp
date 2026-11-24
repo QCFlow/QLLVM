@@ -12,6 +12,7 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+#include "utils/mutation_tracking.hpp"
 #include "CommutativeCancellationPass.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -538,6 +539,7 @@ void delete_gate(std::vector<mlir::quantum::ValueSemanticsInstOp> &dead,std::str
     }
     for(auto &op : dead){
       op->dropAllUses();
+      optimization::markChanged();
       op.erase();
     }
   }else if(dead.size() > 2){
@@ -548,6 +550,7 @@ void delete_gate(std::vector<mlir::quantum::ValueSemanticsInstOp> &dead,std::str
     for(auto &op1 : dead){  
       if(op1 != dead.back()){
         op1->dropAllUses();
+        optimization::markChanged();
         op1.erase();
       }
     }
@@ -771,6 +774,7 @@ void CommutativeCancellationPass::runOnOperation() {
       replace_x_z(vect,name);
       for(auto &op1 : vect){
         op1->dropAllUses();
+        optimization::markChanged();
         op1.erase();
       }
     }
@@ -782,6 +786,7 @@ void CommutativeCancellationPass::runOnOperation() {
       replace_x_z(vect,name);
       for(auto &op1 : vect){
         op1->dropAllUses();
+        optimization::markChanged();
         op1.erase();
       }
     }

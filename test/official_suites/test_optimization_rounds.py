@@ -16,10 +16,11 @@ class OptimizationRoundTests(unittest.TestCase):
     def compile_both(self,text):
         outputs=[]
         for fixed in ['0','1']:
-            with patch.dict(os.environ,QLLVM_FIXED_OPT_ROUNDS=fixed):
+            with patch.dict(os.environ,QLLVM_FIXED_OPT_ROUNDS=fixed,QLLVM_AUDIT_MUTATIONS='1'):
                 result,out=parser_tests.ParserRegressionTests.compile(self,text,'O1',45,
                     ['-mlir-disable-threading','-trace-timings'])
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertNotIn('mutation-audit-mismatch',result.stderr)
             outputs.append((qasm2.loads(out,custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS),result.stderr))
         return outputs
 

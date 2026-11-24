@@ -11,6 +11,7 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+#include "utils/mutation_tracking.hpp"
 #include "trans_basicgate.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -1384,6 +1385,7 @@ void trans_basicgate::runOnOperation(){
     }
     for(auto &elem: dead_ops){
         elem->dropAllUses();
+        optimization::markChanged();
         elem.erase();
     }
 

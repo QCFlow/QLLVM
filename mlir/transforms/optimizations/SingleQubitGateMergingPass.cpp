@@ -11,6 +11,7 @@
  * copyright notice, and modified files need to carry a notice indicating
  * that they have been altered from the originals.
  */
+#include "utils/mutation_tracking.hpp"
 #include "SingleQubitGateMergingPass.hpp"
 #include "Quantum/QuantumOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -216,6 +217,7 @@ void SingleQubitGateMergingPass::runOnOperation() {
 
   for (auto &op : deadOps) {
     op->dropAllUses();
+    optimization::markChanged();
     op.erase();
   }
 
