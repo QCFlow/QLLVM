@@ -18,6 +18,9 @@
 #include "qasm3Lexer.h"
 #include "qasm3Parser.h"
 #include "qasm3_visitor.hpp"
+#include "utils/flat_qasm_chunks.hpp"
+#include <algorithm>
+#include <cstdlib>
 
 namespace qllvm {
 
@@ -275,19 +278,7 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
                  "preamble text.\n";
     exit(1);
   }
-  // Modified 2026-11-21: the old loop only trimmed leading whitespace and
-  // rebuilt the same text while retaining a vector copy of every line. Gate
-  // names and the copied source were unused. Let the lexer handle whitespace,
-  // retaining comments/newlines and the required exponent normalization.
-  const std::string src_new = normalizeExponentLiterals(src);
-  ANTLRInputStream input(src_new);
-#else
-  ANTLRInputStream input(src);
 #endif
-  qasm3Lexer lexer(&input);
-  CommonTokenStream tokens(&lexer);
-  qasm3Parser parser(&tokens);
-  mark("preprocess");
 
   class Qasm3ParserErrorListener : public BaseErrorListener {
    private:
@@ -310,10 +301,82 @@ void OpenQasmV3MLIRGenerator::mlirgen(const std::string &src) {
     }
   };
 
+  Qasm3ParserErrorListener el(file_name);
+  const char *disableChunks = std::getenv("QLLVM_DISABLE_CHUNKED_QASM");
+  const auto chunks = disableChunks && std::string(disableChunks) == "1"
+      ? std::vector<size_t>{} : flatQasmChunks(src);
+  if (!chunks.empty()) {
+    mark("preprocess");
+    double tokenizeSeconds=0, parseSeconds=0, generateSeconds=0;
+    size_t begin=0, line=1, column=0;
+    bool first=true;
+    for (size_t end : chunks) {
+      const std::string piece=normalizeExponentLiterals(src.substr(begin,end-begin));
+      ANTLRInputStream input(piece);
+      qasm3Lexer lexer(&input);
+      lexer.setLine(line);lexer.setCharPositionInLine(column);
+      lexer.removeErrorListeners();lexer.addErrorListener(&el);
+      CommonTokenStream tokens(&lexer);
+      qasm3Parser parser(&tokens);
+      parser.removeErrorListeners();
+      auto phaseStart=Clock::now();
+      if (traceFrontend) tokens.fill();
+      tokenizeSeconds+=std::chrono::duration<double>(Clock::now()-phaseStart).count();
+      phaseStart=Clock::now();
+      std::vector<tree::ParseTree *> trees;
+      auto parseChunk=[&]() {
+        trees.clear();
+        if (first) trees.push_back(parser.header());
+        while (tokens.LA(1)!=Token::EOF) {
+          const size_t before=tokens.index();
+          // qreg is a globalStatement in this grammar, rather than a
+          // statement. Keep the same top-level dispatch as program().
+          if (tokens.LT(1)->getText()=="qreg") trees.push_back(parser.globalStatement());
+          else trees.push_back(parser.statement());
+          if (tokens.index()==before) throw ParseCancellationException("Unconsumed statement");
+        }
+      };
+      parser.getInterpreter<atn::ParserATNSimulator>()->setPredictionMode(atn::PredictionMode::SLL);
+      parser.setErrorHandler(std::make_shared<BailErrorStrategy>());
+      try { parseChunk(); }
+      catch (const ParseCancellationException &) {
+        tokens.seek(0);parser.reset();
+        parser.getInterpreter<atn::ParserATNSimulator>()->setPredictionMode(atn::PredictionMode::LL);
+        parser.setErrorHandler(std::make_shared<DefaultErrorStrategy>());
+        parser.addErrorListener(&el);parseChunk();
+      }
+      parseSeconds+=std::chrono::duration<double>(Clock::now()-phaseStart).count();
+      phaseStart=Clock::now();
+      for (auto *tree : trees) visitor->visit(tree);
+      generateSeconds+=std::chrono::duration<double>(Clock::now()-phaseStart).count();
+      for (size_t i=begin;i<end;++i) {
+        if (src[i]=='\n') {++line;column=0;}
+        else if ((static_cast<unsigned char>(src[i])&0xc0)!=0x80) ++column;
+      }
+      first=false;begin=end;
+      // The parser, tokens and tree for this chunk die before the next one.
+    }
+    if (traceFrontend) {
+      std::cerr << "[qllvm-frontend] phase=tokenize seconds=" << tokenizeSeconds << "\n"
+                << "[qllvm-frontend] phase=parse seconds=" << parseSeconds << "\n"
+                << "[qllvm-frontend] phase=mlir-generate seconds=" << generateSeconds << "\n"
+                << "[qllvm-frontend] chunked=1 chunks=" << chunks.size() << "\n";
+    }
+    return;
+  }
+#ifndef ZHUYU_202410
+  const std::string src_new=normalizeExponentLiterals(src);
+  ANTLRInputStream input(src_new);
+#else
+  ANTLRInputStream input(src);
+#endif
+  qasm3Lexer lexer(&input);
+  CommonTokenStream tokens(&lexer);
+  qasm3Parser parser(&tokens);
+  mark("preprocess");
   // Setup our custom error listeners
   lexer.removeErrorListeners();
   parser.removeErrorListeners();
-  Qasm3ParserErrorListener el(file_name);
   lexer.addErrorListener(&el);
   if (traceFrontend) {
     tokens.fill(); // Explicitly separate lexer cost only in diagnostic mode.
