@@ -36,6 +36,7 @@
 #include "openqasmv3_mlir_generator.hpp"
 #include "pass_manager.hpp"
 #include "optimizations/PhaseGadgetRemovalPass.hpp"
+#include "optimizations/LinearReversiblePass.hpp"
 #include "qllvm-mlir-helper.hpp"
 #include "qllvm/BackendOptions.hpp"
 #include "qllvm/BackendRegistry.hpp"
@@ -249,6 +250,10 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   if (opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
       !(disablePhaseGadgets && std::string(disablePhaseGadgets) == "1"))
     pm.addPass(std::make_unique<qllvm::PhaseGadgetRemovalPass>());
+  const char *disableLinear = std::getenv("QLLVM_DISABLE_LINEAR_OPT");
+  if (opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
+      !(disableLinear && std::string(disableLinear) == "1"))
+    pm.addPass(std::make_unique<qllvm::LinearReversiblePass>());
   pm.addPass(std::make_unique<qllvm::DecomposemultiPass>());
   if (opts.optLevel == 0){
     pm.addPass(std::make_unique<qllvm::Check_gate>());
