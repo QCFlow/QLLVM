@@ -24,6 +24,7 @@
 #include "mlir/Transforms/Passes.h"
 #include <iostream>
 #include "utils/circuit.hpp"
+#include "llvm/ADT/DenseSet.h"
 
 namespace qllvm {
 void SingleQubitIdentityPairRemovalPass::getDependentDialects(
@@ -49,9 +50,15 @@ void SingleQubitIdentityPairRemovalPass::runOnOperation() {
     }
   }
   // Walk the operations within the function.
+  // Modified 2026-11-24: preserve deterministic erase order without scanning
+  // the growing deletion list for every gate in a long cancellation chain.
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
+  llvm::DenseSet<mlir::Operation *> deadSet;
+  auto markDead = [&](mlir::quantum::ValueSemanticsInstOp gate) {
+    if (deadSet.insert(gate.getOperation()).second) deadOps.push_back(gate);
+  };
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    if (std::find(deadOps.begin(), deadOps.end(), op) != deadOps.end()) {
+    if (deadSet.count(op.getOperation())) {
       // Skip this op since it was merged (forward search)
       return;
     }
@@ -69,8 +76,8 @@ void SingleQubitIdentityPairRemovalPass::runOnOperation() {
           // need to get users of next_inst and point them to use
           // op.getOperands
           (*next_inst.result_begin()).replaceAllUsesWith(op.getOperand(0));
-          deadOps.emplace_back(op);
-          deadOps.emplace_back(next_inst);
+          markDead(op);
+          markDead(next_inst);
         }
       }
     }
@@ -136,9 +143,15 @@ void CNOTIdentityPairRemovalPass::runOnOperation() {
     }
   }
   // Walk the operations within the function.
+  // Modified 2026-11-24: preserve deterministic erase order without scanning
+  // the growing deletion list for every gate in a long cancellation chain.
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
+  llvm::DenseSet<mlir::Operation *> deadSet;
+  auto markDead = [&](mlir::quantum::ValueSemanticsInstOp gate) {
+    if (deadSet.insert(gate.getOperation()).second) deadOps.push_back(gate);
+  };
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    if (std::find(deadOps.begin(), deadOps.end(), op) != deadOps.end()) {
+    if (deadSet.count(op.getOperation())) {
       // Skip this op since it was merged (forward search)
       return;
     }
@@ -198,8 +211,8 @@ void CNOTIdentityPairRemovalPass::runOnOperation() {
       next_inst_result_1.replaceAllUsesWith(op.getOperand(1));
 
       // Remove the identity pair
-      deadOps.emplace_back(op);
-      deadOps.emplace_back(src_user);
+      markDead(op);
+      markDead(next_inst);
     }
   });
 
@@ -257,9 +270,15 @@ void DuplicateResetRemovalPass::runOnOperation() {
     }
   }
   // Walk the operations within the function.
+  // Modified 2026-11-24: preserve deterministic erase order without scanning
+  // the growing deletion list for every gate in a long cancellation chain.
   std::vector<mlir::quantum::ValueSemanticsInstOp> deadOps;
+  llvm::DenseSet<mlir::Operation *> deadSet;
+  auto markDead = [&](mlir::quantum::ValueSemanticsInstOp gate) {
+    if (deadSet.insert(gate.getOperation()).second) deadOps.push_back(gate);
+  };
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
-    if (std::find(deadOps.begin(), deadOps.end(), op) != deadOps.end()) {
+    if (deadSet.count(op.getOperation())) {
       // Skip this op since it was deleted (forward search)
       return;
     }
@@ -281,7 +300,7 @@ void DuplicateResetRemovalPass::runOnOperation() {
           // Chain the input -> output and mark this second reset to delete:
           (*next_inst.result_begin())
               .replaceAllUsesWith(next_inst.getOperand(0));
-          deadOps.emplace_back(next_inst);
+          markDead(next_inst);
         }
       }
     }
