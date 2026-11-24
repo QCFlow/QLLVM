@@ -13,6 +13,27 @@ import test_qllvm_parser_regression as parser_tests
 
 @unittest.skipUnless(os.environ.get('QLLVM_TEST_COMPILER'), 'Set QLLVM_TEST_COMPILER')
 class BlockCollectionTests(unittest.TestCase):
+    def test_compilation_cache_reuses_only_exact_results_across_rounds(self):
+        c=QuantumCircuit(4)
+        for k in range(18):
+            for a,b in ((0,1),(2,3)):
+                c.cx(a,b);c.rx(.37 if k%2 else .370000000001,a)
+                c.rz(-.23,b);c.cx(b,a)
+        outputs=[]
+        for disabled in ('0','1'):
+            with patch.dict(os.environ,QLLVM_DISABLE_SYNTHESIS_CACHE=disabled):
+                result,text=parser_tests.ParserRegressionTests.compile(self,qasm2.dumps(c),'O1',45,
+                    ['-mlir-disable-threading','-trace-timings','-exact-rotations'])
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            after=qasm2.loads(text,custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
+            self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-7,rtol=0))
+            outputs.append(text)
+            m=re.search(r'\[qllvm-synthesis-cache\] hits=(\d+) misses=(\d+) bytes=(\d+)',result.stderr)
+            self.assertIsNotNone(m,result.stderr)
+            if disabled=='0':self.assertGreater(int(m[1]),0)
+            else:self.assertEqual(tuple(map(int,m.groups())),(0,0,0))
+        self.assertEqual(outputs[0],outputs[1])
+
     def test_collection_state_is_not_written_to_the_ir(self):
         c=QuantumCircuit(3)
         for k in range(6):

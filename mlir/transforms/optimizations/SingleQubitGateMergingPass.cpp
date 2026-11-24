@@ -27,6 +27,7 @@
 #include <iomanip> 
 #include "utils/circuit.hpp"
 #include "utils/op.hpp"
+#include "utils/synthesis_cache.hpp"
 #include "llvm/ADT/DenseSet.h"
 #include <unordered_map>
 
@@ -64,8 +65,9 @@ void SingleQubitGateMergingPass::runOnOperation() {
   llvm::DenseSet<mlir::Operation *> deadSet;
   // Modified 2026-11-21: repeat sequences (including their exact angle bits)
   // often recur on different wires. Cache synthesis, never quantum values.
-  std::unordered_map<std::string, std::vector<qllvm::utils::qop_t>> synthesisCache;
-  size_t cachedKeyBytes = 0;
+  synthesis::Memo<std::vector<qllvm::utils::qop_t>> localSynthesisCache;
+  auto &synthesisCache = synthesis::currentCache ? synthesis::currentCache->sequences1q : localSynthesisCache;
+  const auto basisKey = synthesis::basisKey(basicgateset);
   std::vector<std::string> unableOps = {"mz","reset","u1","u2","p","u"};
   getOperation().walk([&](mlir::quantum::ValueSemanticsInstOp op) {
     // Preserve sub-block phase until coherent-control lowering is complete.
@@ -149,7 +151,7 @@ void SingleQubitGateMergingPass::runOnOperation() {
         ops.emplace_back(
             std::make_pair(ops_list[i].name().str(), op_params[i]));
       }
-      std::string key;
+      std::string key = basisKey;
       for (const auto &gate : ops) {
         key.append(gate.first); key.push_back('\0');
         const size_t count = gate.second.size();
@@ -157,18 +159,12 @@ void SingleQubitGateMergingPass::runOnOperation() {
         for (double angle : gate.second)
           key.append(reinterpret_cast<const char *>(&angle), sizeof(angle));
       }
-      auto cached = synthesisCache.find(key);
       std::vector<qllvm::utils::qop_t> simplified_seq;
-      if (cached != synthesisCache.end()) simplified_seq = cached->second;
-      else {
+      if (!synthesisCache.find(key, simplified_seq)) {
         simplified_seq = qllvm::utils::new_euler_decompose(ops,basicgateset);
-        if (synthesisCache.size() < 4096 && key.size() <= 4096 &&
-            cachedKeyBytes + key.size() <= 4 * 1024 * 1024) {
-          cachedKeyBytes += key.size();
-          synthesisCache.emplace(std::move(key), simplified_seq);
-        }
+        synthesisCache.insert(key, simplified_seq);
       }
-      
+
       if (simplified_seq.size() < ops_list.size()) {
         rewriter.setInsertionPointAfter(ops_list.back());
         std::vector<mlir::quantum::ValueSemanticsInstOp> new_ops;

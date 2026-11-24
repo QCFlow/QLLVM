@@ -18,6 +18,7 @@
 
 #include "CompilationPipeline.hpp"
 #include "optimizations/utils/approximation_budget.hpp"
+#include "optimizations/utils/synthesis_cache.hpp"
 
 #include "Quantum/QuantumDialect.h"
 #include "llvm/Support/Path.h"
@@ -183,6 +184,7 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
   const double nearBudget = budgetOption == frontendArgs.end() ? 1e-6 : std::stod(budgetOption->second);
   frontendArgs.erase("_qllvm_near_budget");
   qllvm::approximation::reset(nearBudget);
+  qllvm::synthesis::CacheScope synthesisCacheScope;
   auto mlir_gen_result = qllvm::util::mlir_gen(
       opts.inputFile, opts.addEntryPoint, opts.kernelName, frontendArgs);
   mark("frontend-end");
@@ -296,6 +298,15 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     return result;
   }
   mark("optimization-end");
+  if (opts.traceTimings) {
+    const auto &cache = synthesisCacheScope.cache;
+    std::cerr << "[qllvm-synthesis-cache] hits="
+              << cache.matrices1q.hits + cache.sequences1q.hits + cache.matrices2q.hits
+              << " misses="
+              << cache.matrices1q.misses + cache.sequences1q.misses + cache.matrices2q.misses
+              << " bytes=" << cache.matrices1q.bytes + cache.sequences1q.bytes + cache.matrices2q.bytes
+              << std::endl;
+  }
   
 
   if (opts.emitMLIR) {

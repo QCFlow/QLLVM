@@ -35,6 +35,7 @@
 #include "utils/kak.hpp"
 #include "utils/local_unitary.hpp"
 #include "utils/synthesis_diagnostics.hpp"
+#include "utils/synthesis_cache.hpp"
 #include "CommutativeCancellationPass.hpp"
 #include <algorithm>
 #include <Eigen/Dense>
@@ -64,8 +65,9 @@ struct BlockCollectionState {
   llvm::DenseMap<mlir::Operation *, size_t> order;
   llvm::DenseSet<mlir::Operation *> selected, traversedSingles;
   const std::unordered_set<std::string> &basis;
+  std::string basisKey;
   explicit BlockCollectionState(const std::unordered_set<std::string> &basis)
-      : basis(basis) {}
+      : basis(basis), basisKey(synthesis::basisKey(basis)) {}
 };
 
 static std::vector<std::pair<std::string, int64_t>> blockWires(
@@ -545,7 +547,7 @@ bool allClose(const Eigen::MatrixBase<Derived> &in_mat1,
 
 // Modified 2026-11-21: cache only bit-identical one-qubit synthesis inputs
 // within this pass/basis. No SSA handles or rounded angles enter the cache.
-using OneQubitSynthesisCache = std::unordered_map<std::string, std::vector<qllvm::utils::qop_t>>;
+using OneQubitSynthesisCache = synthesis::Memo<std::vector<qllvm::utils::qop_t>>;
 static std::string oneQubitMatrixKey(const Eigen::Matrix2cd &matrix) {
   std::string key;
   key.reserve(8 * sizeof(double));
@@ -592,13 +594,11 @@ void del_1q_sequence(BlockCollectionState &state,std::vector<mlir::quantum::Valu
       auto basis = qllvm::utils::euler_Basis_FromStr(basis_names[i]);
       target_basis_set.emplace_back(basis);
   }
-  const auto key = oneQubitMatrixKey(test_matrix);
-  auto cached = cache.find(key);
+  const auto key = state.basisKey + oneQubitMatrixKey(test_matrix);
   std::vector<qllvm::utils::qop_t> simplified_seq;
-  if (cached != cache.end()) simplified_seq = cached->second;
-  else {
+  if (!cache.find(key, simplified_seq)) {
     simplified_seq = qllvm::utils::leastcost_basis(test_matrix,target_basis_set);
-    if (test_matrix.allFinite() && cache.size() < 4096) cache.emplace(key, simplified_seq);
+    if (test_matrix.allFinite()) cache.insert(key, simplified_seq);
   }
   auto last = run.back();
   auto first = run.front();
@@ -765,7 +765,7 @@ mlir::Value &outputQubit1,std::vector<std::pair<std::string, int64_t>> index_fro
 // Modified 2026-11-19: repeated circuit blocks often have exactly the same
 // local unitary. Cache only bit-identical matrices within one pass/basis; no
 // rounding, approximate matching, or cached SSA handles are involved.
-using SynthesisCache = std::unordered_map<std::string, qllvm::kak::KAK::SynthesisResult>;
+using SynthesisCache = synthesis::Memo<qllvm::kak::KAK::SynthesisResult>;
 static std::string exactMatrixKey(const Eigen::MatrixXcd &matrix) {
   std::string key;
   key.reserve(32 * sizeof(double));
@@ -843,13 +843,11 @@ void kak_decompose_u3(BlockCollectionState &state,std::vector<mlir::quantum::Val
       }
     }
   }
-  const auto key = exactMatrixKey(current);
-  auto found = synthesisCache.find(key);
+  const auto key = state.basisKey + exactMatrixKey(current);
   qllvm::kak::KAK::SynthesisResult result;
-  if (found != synthesisCache.end()) result = found->second;
-  else {
+  if (!synthesisCache.find(key, result)) {
     result = qllvm::kak::KAK().expand(current, {0, 1}, state.basis);
-    if (synthesisCache.size() < 4096) synthesisCache.emplace(key, result);
+    synthesisCache.insert(key, result);
   }
   if (!result) return;
   auto &gates = *result;
@@ -961,7 +959,8 @@ void ConsolidateBlocks::runOnOperation() {
   state.selected.clear();
 
   deadOps.clear();
-  SynthesisCache synthesisCache;
+  SynthesisCache localSynthesisCache;
+  auto &synthesisCache = synthesis::currentCache ? synthesis::currentCache->matrices2q : localSynthesisCache;
   for(auto &elem:blocks){
     kak_decompose_u3(state,elem,deadOps,synthesisCache);
   }
@@ -1034,7 +1033,8 @@ void ConsolidateBlocks::runOnOperation() {
       kak_decompose_u3(state,pairBlock, deadOps, synthesisCache);
     }
   }
-  OneQubitSynthesisCache oneQubitCache;
+  OneQubitSynthesisCache localOneQubitCache;
+  auto &oneQubitCache = synthesis::currentCache ? synthesis::currentCache->matrices1q : localOneQubitCache;
   int selected = 0;
   int stop = 0;
   for(auto &run: runs){
