@@ -598,17 +598,22 @@ void mergeVectors(std::vector<qllvm::kak::TMP_OP> &vec1, std::vector<qllvm::kak:
     vec1.insert(vec1.end(), vec2.begin(), vec2.end());
 }
 
-std::vector<qllvm::kak::TMP_OP> KAK::expand(Eigen::Matrix4cd unitary, std::vector<size_t> bits,std::unordered_set<std::string>  basic_gate_set) {
+KAK::SynthesisResult KAK::expand(Eigen::Matrix4cd unitary, std::vector<size_t> bits,std::unordered_set<std::string>  basic_gate_set) {
   if (!isUnitary(unitary)) {
     if (synthesis::allowDiagnostic()) std::cerr << "expand: input not unitary\n";
-    std::vector<qllvm::kak::TMP_OP> tmp;
-    return tmp;
+    return std::nullopt;
   }
+  // Modified 2026-11-24: recognize only a bit-exact scalar identity here.
+  // No tolerance or approximation budget is spent by this fast path.
+  bool identity = true;
+  for (int row = 0; row < 4; ++row)
+    for (int col = 0; col < 4; ++col)
+      identity &= unitary(row, col) == (row == col ? unitary(0, 0) : std::complex<double>(0, 0));
+  if (identity) return std::vector<TMP_OP>{};
   auto result = kakDecomposition(unitary);
   if (!result.has_value()) {
     if (synthesis::allowDiagnostic()) std::cerr << "expand: kak decomposition failed\n";
-    std::vector<qllvm::kak::TMP_OP> tmp;
-    return tmp;
+    return std::nullopt;
   }
   
   if (!qllvm::matrix::sameLocalUnitary(unitary, result->toMat())) {

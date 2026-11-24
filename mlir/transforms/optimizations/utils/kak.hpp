@@ -61,7 +61,10 @@ public:
 class KAK{
 public:
    std::vector<std::string> requiredKeys();
-   std::vector<qllvm::kak::TMP_OP> expand(Eigen::Matrix4cd unitary, std::vector<size_t> bits,std::unordered_set<std::string>  basic_gate_set);
+   // A disengaged result means synthesis failed; a successful empty sequence
+   // is the identity and is eligible for replacement after SSA checks.
+   using SynthesisResult = std::optional<std::vector<TMP_OP>>;
+   SynthesisResult expand(Eigen::Matrix4cd unitary, std::vector<size_t> bits,std::unordered_set<std::string>  basic_gate_set);
 private:
   // Single qubit gate matrix
   using GateMatrix = Eigen::Matrix<std::complex<double>, 2, 2>;

@@ -11,6 +11,21 @@ import test_qllvm_parser_regression as parser_tests
 
 @unittest.skipUnless(os.environ.get('QLLVM_TEST_COMPILER'), 'Set QLLVM_TEST_COMPILER')
 class BlockCollectionTests(unittest.TestCase):
+    def test_identity_block_removes_both_outputs_without_numerical_synthesis(self):
+        c=QuantumCircuit(4)
+        c.h(2)
+        c.cz(1,0);c.cz(1,0)
+        c.cx(2,3)
+        with tempfile.TemporaryDirectory() as tmp:
+            passes=Path(tmp)/'passes.txt';passes.write_text('1\n')
+            result,text=parser_tests.ParserRegressionTests.compile(self,qasm2.dumps(c),'O1',45,
+                ['-customPassSequence='+str(passes),'-mlir-disable-threading','-exact-rotations'])
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        after=qasm2.loads(text,custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
+        self.assertTrue(Operator(c).equiv(Operator(after),atol=1e-9,rtol=0))
+        self.assertEqual(after.count_ops().get('cz',0),1)
+        self.assertEqual(len(after.data),4)  # Independent H + target-basis CX.
+
     def test_synthesis_diagnostics_are_opt_in_and_preserve_the_operator(self):
         c=QuantumCircuit(2)
         for k in range(180):

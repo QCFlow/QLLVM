@@ -1008,7 +1008,7 @@ mlir::Value &outputQubit1,std::vector<std::pair<std::string, int64_t>> index_fro
 // Modified 2026-11-19: repeated circuit blocks often have exactly the same
 // local unitary. Cache only bit-identical matrices within one pass/basis; no
 // rounding, approximate matching, or cached SSA handles are involved.
-using SynthesisCache = std::unordered_map<std::string, std::vector<qllvm::kak::TMP_OP>>;
+using SynthesisCache = std::unordered_map<std::string, qllvm::kak::KAK::SynthesisResult>;
 static std::string exactMatrixKey(const Eigen::MatrixXcd &matrix) {
   std::string key;
   key.reserve(32 * sizeof(double));
@@ -1089,13 +1089,14 @@ void kak_decompose_u3(std::vector<mlir::quantum::ValueSemanticsInstOp> &candidat
   }
   const auto key = exactMatrixKey(current);
   auto found = synthesisCache.find(key);
-  std::vector<qllvm::kak::TMP_OP> gates;
-  if (found != synthesisCache.end()) gates = found->second;
+  qllvm::kak::KAK::SynthesisResult result;
+  if (found != synthesisCache.end()) result = found->second;
   else {
-    gates = qllvm::kak::KAK().expand(current, {0, 1}, basic_gateset);
-    if (synthesisCache.size() < 4096) synthesisCache.emplace(key, gates);
+    result = qllvm::kak::KAK().expand(current, {0, 1}, basic_gateset);
+    if (synthesisCache.size() < 4096) synthesisCache.emplace(key, result);
   }
-  if (gates.empty()) return;
+  if (!result) return;
+  auto &gates = *result;
   int newTwoQubit = 0;
   for (const auto &gate : gates) newTwoQubit += gate.indexs.size() == 2;
   const bool accept = newTwoQubit < oldTwoQubit ||
