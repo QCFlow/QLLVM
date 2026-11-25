@@ -19,6 +19,10 @@
 
 </div>
 
+### 直接对象前端与本地混合执行（v0.1）
+
+新增 Qiskit/Cirq 电路对象直接导入、参数化 Program、版本化可执行包，以及按任务隔离结果的本地 Runtime。Python 主机可以循环绑定参数和取回采样结果；新原生入口直接构建量子 MLIR。使用及范围见[直接前端与本地混合执行](docs/direct_hybrid_v01.md)，本轮测试见[验证记录](docs/direct_hybrid_v01_validation.md)。真机 Provider、完整高级语言工作流捕获及实时反馈留待后续阶段。
+
 ---
 
 **QLLVM** 是一个基于 [LLVM](https://llvm.org/) 构建的**经典-量子混合编译框架**，具备卓越的**可扩展性**以及与**经典高性能计算生态**的无缝集成能力。

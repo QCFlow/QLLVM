@@ -28,6 +28,7 @@
  #include "qiskit_mlir_generator.hpp"
  #include "openqasmv3_mlir_generator.hpp"
  #include "qcis_mlir_generator.hpp"
+ #include "ProgramJson.hpp"
  #include "pass_manager.hpp"
  #include "quantum_to_llvm.hpp"
  // #include "tools/ast_printer.hpp"
@@ -35,7 +36,7 @@
  namespace util {
  // Helper to run common MLIR tasks:
  // enum SourceLanguage { QASM2, QASM3 };
- enum SourceLanguage { QASM3 ,QISKIT,QCIS};
+ enum SourceLanguage { QASM3 ,QISKIT,QCIS,PROGRAM_JSON};
  // Wrapper for MLIR generation results:
  struct MlirGenerationResult {
    std::unique_ptr<mlir::MLIRContext> mlir_context;
@@ -94,7 +95,11 @@
 
    // Route to parser: prefer OpenQasmV3 (stable). OpenQASM 2.0 is converted
    // to 3 preamble to avoid QiskitMLIRGenerator segfault (see issue debug).
-   if (qasm_src.find("OPENQASM 3;") != std::string::npos) {
+   const bool directProgram = extra_quantum_args.count("input_backend") &&
+                              extra_quantum_args.at("input_backend") == "program-json";
+   if (directProgram) {
+     src_language_type = SourceLanguage::PROGRAM_JSON;
+   } else if (qasm_src.find("OPENQASM 3;") != std::string::npos) {
      src_language_type = SourceLanguage::QASM3;
    }  else if (qasm_src.find("OPENQASM 2.0") != std::string::npos) {
     // Preprocess: replace OPENQASM 2.0 with OPENQASM 3 for compatible 2.0 subset
@@ -113,6 +118,8 @@
        src_language_type = SourceLanguage::QCIS;
      }else if (value == "qiskit") {
        src_language_type = SourceLanguage::QISKIT;
+     }else if (value == "program-json") {
+       src_language_type = SourceLanguage::PROGRAM_JSON;
      }else {
        std::cout << "No other mlir generators yet.\n";
        exit(1);
@@ -127,11 +134,13 @@
      mlir_generator = std::make_shared<qllvm::QiskitMLIRGenerator>(context);
    } else if (src_language_type == SourceLanguage::QCIS) {
      mlir_generator = std::make_shared<qllvm::qcisMLIRGenerator>(context);
+   } else if (src_language_type == SourceLanguage::PROGRAM_JSON) {
+     mlir_generator = std::make_shared<qllvm::ProgramJsonGenerator>(context);
    }else {
      std::cout << "No other mlir generators yet.\n";
      exit(1);
    }
- 
+
    mlir_generator->initialize_mlirgen(
        addEntryPoint, kernel_name,
        extra_quantum_args);  // FIXME HANDLE RELATIVE PATH
@@ -178,4 +187,3 @@
  }
  }  // namespace util
  } // namespace qllvm
- 

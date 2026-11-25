@@ -246,12 +246,14 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     turn_to_u3 = true;
   }
   
+  const bool directProgram = opts.extraArgs.count("input_backend") &&
+                             opts.extraArgs.at("input_backend") == "program-json";
   const char *disablePhaseGadgets = std::getenv("QLLVM_DISABLE_PHASE_GADGETS");
-  if (opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
+  if (!directProgram && opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
       !(disablePhaseGadgets && std::string(disablePhaseGadgets) == "1"))
     pm.addPass(std::make_unique<qllvm::PhaseGadgetRemovalPass>());
   const char *disableLinear = std::getenv("QLLVM_DISABLE_LINEAR_OPT");
-  if (opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
+  if (!directProgram && opts.optLevel >= 1 && !opts.customPassSequenceFile && !opts.synOpt && !opts.randomSeq &&
       !(disableLinear && std::string(disableLinear) == "1"))
     pm.addPass(std::make_unique<qllvm::LinearReversiblePass>());
   pm.addPass(std::make_unique<qllvm::DecomposemultiPass>());
@@ -260,7 +262,20 @@ CompilationResult runCompilationPipeline(const CompilationOptions& opts) {
     // pm.addPass(std::make_unique<qllvm::InputStatePreambleOptimization>());
   }
 
-  if (opts.optLevel >= 1) {
+  if (directProgram && (opts.customPassSequenceFile || opts.synOpt || opts.randomSeq || opts.basicGateSet ||
+                        opts.sabreOptions.has_value())) {
+    result.exitCode = 1;
+    result.errorMessage = "[program-json] v0.1 uses a validated static schedule; custom synthesis, basis conversion and routing are not enabled";
+    return result;
+  }
+  if (directProgram && opts.optLevel >= 1) {
+    // Modified 2026-11-24: synthesis passes need separate validation on the
+    // object import representation. Enable only the tested local reductions.
+    mark("direct-conservative-optimization");
+    pm.addPass(std::make_unique<qllvm::SingleQubitIdentityPairRemovalPass>());
+    pm.addPass(std::make_unique<qllvm::CNOTIdentityPairRemovalPass>());
+    pm.addPass(std::make_unique<qllvm::DuplicateResetRemovalPass>());
+  } else if (opts.optLevel >= 1) {
     if (opts.customPassSequenceFile) {
       std::ifstream infile(*opts.customPassSequenceFile);
       if (!infile.is_open()) {

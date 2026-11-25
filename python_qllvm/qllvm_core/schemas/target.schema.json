@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "qllvm.target"
+    },
+    "provider": {
+      "enum": [
+        "local",
+        "mock"
+      ]
+    },
+    "target": {
+      "const": "basic-simulator"
+    },
+    "simulator": {
+      "const": true
+    },
+    "max_qubits": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_shots": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "program_format": {
+      "const": "openqasm2"
+    },
+    "parameter_binding": {
+      "const": "specialize_before_codegen"
+    },
+    "classical_control": {
+      "const": false
+    },
+    "mid_circuit_measurement": {
+      "const": true
+    },
+    "reset": {
+      "const": true
+    },
+    "result_kind": {
+      "const": "counts"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "provider",
+    "target",
+    "simulator",
+    "max_qubits",
+    "max_shots",
+    "program_format",
+    "parameter_binding",
+    "classical_control",
+    "mid_circuit_measurement",
+    "reset",
+    "result_kind"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QLLVM target v0.1"
+}

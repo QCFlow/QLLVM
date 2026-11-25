@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "qllvm.results"
+    },
+    "num_clbits": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bit_order": {
+      "const": "c[n-1]...c[0]"
+    },
+    "registers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bits": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "name",
+          "bits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "qubit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "clbit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "operation",
+          "qubit",
+          "clbit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "unwritten_bits": {
+      "const": "zero"
+    },
+    "repeated_writes": {
+      "const": "last_write_wins"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "num_clbits",
+    "bit_order",
+    "registers",
+    "measurements",
+    "unwritten_bits",
+    "repeated_writes"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QLLVM results v0.1"
+}

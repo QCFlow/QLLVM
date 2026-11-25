@@ -39,3 +39,9 @@ hybrid_bell
 # Optional benchmark environments
 /.venv-bench/
 /.venv-bench-metrics/
+# Python direct frontend/runtime development artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+/python_qllvm/build/

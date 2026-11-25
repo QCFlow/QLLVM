@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qllvm-python"
+version = "0.1.0"
+description = "QLLVM direct circuit frontends and versioned local runtime"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+
+[project.optional-dependencies]
+qiskit = ["qiskit>=2.0,<3", "sympy>=1.12,<2"]
+cirq = ["cirq-core>=1.5,<2", "sympy>=1.12,<2"]
+local = ["qiskit>=2.0,<3"]
+test = ["pytest>=8,<9", "jsonschema>=4,<5"]
+
+[tool.setuptools]
+py-modules = ["qllvm"]
+
+[tool.setuptools.packages.find]
+include = ["qllvm_core*"]
+
+[tool.setuptools.package-data]
+qllvm_core = ["schemas/*.json"]

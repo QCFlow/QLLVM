@@ -1,0 +1,254 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "qllvm.program"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "num_qubits": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "num_clbits": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dtype": {
+            "const": "float64"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "dtype"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "id",
+              "h",
+              "x",
+              "y",
+              "z",
+              "s",
+              "sdg",
+              "t",
+              "tdg",
+              "sx",
+              "rx",
+              "ry",
+              "rz",
+              "p",
+              "u3",
+              "cx",
+              "cz",
+              "swap",
+              "cp",
+              "measure",
+              "reset",
+              "barrier"
+            ]
+          },
+          "qubits": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "clbits": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uniqueItems": true
+          },
+          "params": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/expression"
+            }
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "qubits",
+          "clbits",
+          "params",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "global_phase": {
+      "$ref": "#/$defs/expression"
+    },
+    "registers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bits": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "name",
+          "bits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "frontend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string"
+        },
+        "capture_scope": {
+          "const": "circuit_only"
+        }
+      },
+      "required": [
+        "frontend",
+        "version",
+        "capture_scope"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "name",
+    "num_qubits",
+    "num_clbits",
+    "parameters",
+    "operations",
+    "global_phase",
+    "registers",
+    "source"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "expression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "const"
+            },
+            "value": {
+              "type": "number",
+              "minimum": -1.7976931348623157e+308,
+              "maximum": 1.7976931348623157e+308
+            }
+          },
+          "required": [
+            "op",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "param"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "op",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "add",
+                "mul",
+                "pow",
+                "sin",
+                "cos",
+                "tan",
+                "exp",
+                "log",
+                "abs",
+                "asin",
+                "acos",
+                "atan"
+              ]
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/expression"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QLLVM program v0.1"
+}

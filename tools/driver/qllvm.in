@@ -6,6 +6,12 @@ OPENQASM_ONLY_BUILD = True
 import argparse, sys, os, glob, subprocess, mimetypes, re, pathlib, time, hashlib, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Modified 2026-11-24: keep versioned runtime commands outside legacy parsing.
+if len(sys.argv) > 1 and sys.argv[1] in {"build", "run", "status", "result"}:
+    sys.path.insert(0, "@CMAKE_INSTALL_PREFIX@")
+    from qllvm_core.__main__ import main as runtime_main
+    sys.exit(runtime_main(sys.argv[1:]))
+
 class bcolors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'

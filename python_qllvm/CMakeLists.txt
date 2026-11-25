@@ -3,6 +3,8 @@ configure_file(qllvm.in.py
 
 # install qllvm.py to CMAKE_INSTALL_PREFIX
 install(FILES ${CMAKE_BINARY_DIR}/qllvm.py DESTINATION ${CMAKE_INSTALL_PREFIX})
+install(DIRECTORY qllvm_core DESTINATION ${CMAKE_INSTALL_PREFIX}
+        FILES_MATCHING PATTERN "*.py" PATTERN "*.json")
 
 #Create a .pth file and install it to Python site-packages to make the qllvm module automatically importable (no need to manually set PYTHONPATH)
 # Use site.USER_SITE (~/.local/lib/python3.x/site-packages) to avoid requiring root privileges

@@ -1,0 +1,90 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "qllvm.executable"
+    },
+    "capture_scope": {
+      "const": "circuit_only"
+    },
+    "frontend_path": {
+      "const": "sdk-object-to-mlir"
+    },
+    "parameter_binding": {
+      "const": "specialize_before_codegen"
+    },
+    "opt_level": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "compiler": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "executable_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "program.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "parameters.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "results.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "target.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "program.json",
+        "parameters.json",
+        "results.json",
+        "target.json"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "capture_scope",
+    "frontend_path",
+    "parameter_binding",
+    "opt_level",
+    "compiler",
+    "executable_id",
+    "files"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QLLVM executable v0.1"
+}
