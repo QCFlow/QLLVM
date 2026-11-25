@@ -99,17 +99,17 @@ s=re.sub(r'<p class="when">.*?</p>',f'<p class="when">测试时间：2026-11-17 
 if latest:
     start=merged['metadata']['started_at'][:16].replace('T',' ')
     s=re.sub(r'<p class="when">.*?</p>',f'<p class="when">测试时间：{start} — {stamp}（北京时间）<br>QLLVM {revision} · 新版全目录复测 · 自动更新</p>',s,count=1)
-cards=f'''<section class="status-summary" aria-label="QLLVM 性能测试完成情况">
-<div class="status-heading"><h2>QLLVM 性能测试完成情况</h2><p>已测 <b>{status['tested']}</b> 项 · 完成 <b>{status['passed']}</b> 项 · 完成率 <b>{status['pass_pct']:.1f}%</b></p></div>
+cards=f'''<details class="status-summary" id="completion-status">
+<summary>QLLVM 性能测试完成情况</summary>
+<div class="status-heading"><p>已测 <b>{status['tested']}</b> 项 · 完成 <b>{status['passed']}</b> 项 · 完成率 <b>{status['pass_pct']:.1f}%</b></p></div>
 <div class="status-grid">'''
 if latest:
     cards=cards.replace("</p></div>",f" · 待复测 <b>{status['pending']}</b> 项</p></div>",1)
 for x in status['suites']:
     detail=f"新版已测 {x['tested']} / 待测 {x.get('pending',0)} / 范围内 {x.get('eligible',x['total'])}" if latest else f"目录进度 {x['processed']} / {x['total']}"
     cards+=f'''<article class="status-card" data-suite="{x['suite']}"><h3>{suites[x['suite']]}</h3><strong>{x['pass_pct']:.1f}%</strong><p>完成 {x['passed']} / 已测 {x['tested']}</p><small>{detail}</small></article>'''
-cards+='</div></section>'
-overview_end=s.index('\n  </section>',s.index('id="panel-overview"'))
-s=s[:overview_end]+'\n'+cards+s[overview_end:]
+cards+='</div></details>'
+s=s.replace('\n</div>\n<script>', '\n'+cards+'\n</div>\n<script>', 1)
 s=s.replace('测试后端为全连接 QASM 模拟器。','编译目标采用全连接配置，输出为 QASM。')
 s=s.replace('的性能提升','的编译结果对比')
 s=re.sub(r'(<dt>QLLVM</dt><dd>).*?(</dd>)',lambda m:m[1]+revision+' · SHA-256 '+merged['metadata']['compiler_sha256'][:12]+' · Release O1'+m[2],s)
@@ -120,16 +120,17 @@ s=re.sub(r'<p>环境：.*?</p>','<p>每例三次独立测量；并行用例各�
 s=s.replace('比较取相同输入的三次中位数。','比较取相同输入的三次实测中位数。')
 a=s.index('  <section class="close">');b=s.index('  <section class="detail"',a)
 s=s[:a]+('  <section class="close"><h2>测试结果概述</h2><p>图表按双方取得完整指标的同输入用例计算；门数和深度另要求共同输出门集。'+('本版本全目录测试已结束。' if meta.get('complete') else '尚未完成的用例显示当前进度。')+'</p></section>\n')+s[b:]
-case_html='''<section class="case-browser" id="case-browser"><h2>用例结果</h2>
+case_html='''<section class="case-browser" id="case-browser" hidden><h2>用例结果</h2>
 <div class="case-filters"><input id="case-query" type="search" placeholder="搜索用例，如 qft_N038、hwb10" aria-label="搜索用例">
 <select id="case-suite" aria-label="选择测试集"><option value="">全部测试集</option><option value="mqtbench">MQT Bench</option><option value="qasmbench">QASMBench</option><option value="benchpress">Benchpress</option></select>
 <select id="case-framework" aria-label="选择编译器"><option value="">全部编译器</option>'''+''.join(f'<option value="{f}">{name}</option>' for f,name in framework_names.items())+'''</select>
 <select id="case-status" aria-label="筛选结果"><option value="">全部结果</option><option value="pass">已完成</option><option value="fail">未完成</option></select></div>
 <div class="case-table-wrap"><table class="case-table"><thead><tr><th>用例</th><th>编译器</th><th>结果</th><th>总门数</th><th>双比特门</th><th>深度</th><th>编译秒</th></tr></thead><tbody id="case-rows"></tbody></table></div>
 <div class="case-pagination"><button id="case-prev" type="button">上一页</button><span id="case-page"></span><button id="case-next" type="button">下一页</button><a href="#" id="download-framework-cases">下载全部编译器结果</a><a href="#" id="download-remaining-issues">下载QLLVM剩余问题</a></div></section>'''
-s=s.replace('  <section class="close">',case_html+'\n  <section class="close">')
+s=s.replace('  <details>', case_html+'\n  <details>', 1)
 css='''
-.status-summary{margin:26px 0 0}.status-heading{display:flex;gap:16px;align-items:center;justify-content:space-between}.status-heading h2{font-size:20px;margin:0}.status-heading p{color:var(--muted);font-size:14px}.status-heading b{color:var(--ink)}
+.close[hidden],.case-browser[hidden],.status-summary[hidden]{display:none}
+.status-summary{margin:26px 0 0}.status-heading{display:flex;gap:16px;align-items:center;justify-content:space-between}.status-heading p{color:var(--muted);font-size:14px}.status-heading b{color:var(--ink)}
 .status-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.status-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}.status-card h3{font-size:15px;margin:0 0 10px}.status-card strong{font-size:30px;color:var(--blue-ink)}.status-card p{margin:6px 0;color:var(--muted);font-size:14px}.status-card small{color:var(--faint)}
 .case-browser{margin-top:34px}.case-browser h2{font-size:20px}.case-filters{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.case-filters input{flex:1;min-width:180px}.case-filters input,.case-filters select,.case-pagination button{font:inherit;font-size:14px;border:1px solid var(--line);border-radius:8px;padding:9px;background:white;color:var(--ink)}.case-table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:white}.case-table{width:100%;border-collapse:collapse;font-size:13px;min-width:650px}.case-table th,.case-table td{padding:10px;border-bottom:1px solid var(--line);text-align:right}.case-table th:first-child,.case-table td:first-child{text-align:left;max-width:400px;overflow-wrap:anywhere}.case-table th{background:var(--soft)}.case-pass{color:#187447}.case-other{color:#9d4b16}.case-pagination{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--muted)}.case-pagination a{margin-left:auto}.case-pagination button:disabled{opacity:.4}.case-table small{display:block;color:var(--muted)}
 @media(max-width:650px){.status-heading{display:block}.status-grid{grid-template-columns:1fr}.status-card{display:grid;grid-template-columns:1fr auto;gap:3px 10px}.status-card h3,.status-card p{margin:0}.status-card strong{grid-column:2;grid-row:1/3}.case-pagination a{margin-left:0}}

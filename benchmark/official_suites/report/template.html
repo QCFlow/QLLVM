@@ -620,6 +620,11 @@ function select(id, focus) {
     if (on && focus) tab.focus();
   });
   renderDetail(id);
+  document.querySelector('.close').hidden = id !== "overview";
+  const cases = document.getElementById('case-browser');
+  if (cases) cases.hidden = id === "overview";
+  const completion = document.getElementById('completion-status');
+  if (completion) completion.hidden = id !== "overview";
   if (history.replaceState) history.replaceState(null, "", "#" + id);
 }
 tabs.forEach((tab, i) => {
