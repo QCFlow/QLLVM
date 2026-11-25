@@ -20,6 +20,13 @@ static void cuda_check_(cudaError_t e, const char* what) {
 #define CUDA_CHECK(call) cuda_check_((call), #call)
 
 void launchCudaKernel(int n) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count <= 0) {
+    printf("[host] no CUDA device; skip GPU kernel (n=%d)\n", n);
+    fflush(stdout);
+    return;
+  }
+
   int* d_data = nullptr;
   CUDA_CHECK(cudaMalloc(&d_data, static_cast<size_t>(n) * sizeof(int)));
 

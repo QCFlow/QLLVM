@@ -13,6 +13,7 @@
  */
 
 /*******************************************************************************
+ * Modified November 2026: validate region/placement and emit routing metadata.
  * SabrePass - LLVM New PM integration + IR modification (Strategy B)
  *******************************************************************************/
 
@@ -32,6 +33,8 @@
 #include <llvm/Support/ErrorHandling.h>
 
 #include <algorithm>
+#include <fstream>
+#include <set>
 #include <vector>
 
 namespace qllvm {
@@ -143,6 +146,14 @@ llvm::PreservedAnalyses SabrePass::run(llvm::Module& M,
   llvm::Function* kernel = findKernel(M, opts_.kernelName);
   if (!kernel) return llvm::PreservedAnalyses::all();
 
+  // A circuit extraction in block-list order cannot represent branch/loop
+  // semantics. Reject explicitly rather than silently treating it as a circuit.
+  if (kernel->size() != 1)
+    llvm::report_fatal_error("SABRE supports branch-free, loop-free quantum kernels; "
+                             "this is a control-flow restriction, not a topology restriction.");
+  for (const auto& edge : opts_.couplingEdges)
+    if (edge.first < 0 || edge.second < 0 || edge.first == edge.second)
+      llvm::report_fatal_error("SABRE requires nonnegative distinct coupling endpoints.");
   CouplingMap coupling(opts_.couplingEdges);
   const int numPhys = coupling.numQubits();
   if (numPhys <= 0) return llvm::PreservedAnalyses::all();
@@ -151,7 +162,17 @@ llvm::PreservedAnalyses SabrePass::run(llvm::Module& M,
   if (!qubitAllocStats(kernel, maxChunk, sumChunks))
     return llvm::PreservedAnalyses::all();
   if (maxChunk > numPhys || sumChunks > numPhys)
-    return llvm::PreservedAnalyses::all();
+    llvm::report_fatal_error("SABRE device has fewer qubits than the kernel.");
+  for (int p = 0; p < numPhys; ++p)
+    if (coupling.distance(0, p) < 0)
+      llvm::report_fatal_error("SABRE currently requires a connected coupling graph.");
+  if (opts_.initialLayout) {
+    const auto& mapping = *opts_.initialLayout;
+    std::set<int> unique(mapping.begin(), mapping.end());
+    if ((int)mapping.size() != numPhys || (int)unique.size() != numPhys ||
+        *unique.begin() != 0 || *unique.rbegin() != numPhys - 1)
+      llvm::report_fatal_error("SABRE initial layout must permute all physical indices.");
+  }
 
   if (!expandQubitAllocToCouplingSize(kernel, numPhys))
     return llvm::PreservedAnalyses::all();
@@ -275,6 +296,29 @@ llvm::PreservedAnalyses SabrePass::run(llvm::Module& M,
       modified = true;
   }
 
+  if (!opts_.reportPath.empty()) {
+    std::ofstream report(opts_.reportPath);
+    if (!report) llvm::report_fatal_error("Cannot write SABRE report.");
+    auto vectorJson = [&](const std::vector<int>& v) {
+      report << "[";
+      for (size_t i = 0; i < v.size(); ++i) {
+        if (i) report << ",";
+        report << v[i];
+      }
+      report << "]";
+    };
+    report << "{\n  \"initial_layout\": ";
+    vectorJson(initialLayout);
+    report << ",\n  \"final_layout\": ";
+    vectorJson(result.finalLayout);
+    report << ",\n  \"inserted_swaps\": " << result.insertions.size()
+           << ",\n  \"layout_trials\": " << opts_.layoutTrials
+           << ",\n  \"swap_trials\": " << opts_.swapTrials
+           << ",\n  \"iterations\": " << opts_.maxIterations
+           << ",\n  \"seed\": " << (opts_.seed ? *opts_.seed : 42)
+           << ",\n  \"heuristic\": \"" << opts_.heuristic << "\"\n}\n";
+    if (!report) llvm::report_fatal_error("Cannot finish SABRE report.");
+  }
   return modified ? llvm::PreservedAnalyses::none()
                   : llvm::PreservedAnalyses::all();
 }

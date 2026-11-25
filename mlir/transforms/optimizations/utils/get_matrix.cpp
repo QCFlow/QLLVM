@@ -790,14 +790,9 @@ Eigen::MatrixXcd getGateMat(mlir::quantum::ValueSemanticsInstOp &op,int i){
       // std::cout << "u3 result " << result << std::endl;
         return result;
     }else if(op_name == "cp" && parameters.size() == 1 && op.getOperands().size() == 3){
-      mlir::Value theta_v = op.getOperand(2);
-      auto theta = qllvm::OP::tryGetConstAngle(theta_v);
-      Eigen::MatrixXcd result = Eigen::MatrixXcd::Zero(4, 4);
-      result << 1,0,0,0,
-                0,1,0,0,
-                0,0,1,0,
-                0,0,0,std::exp(std::complex<double>(0,-1*theta));
-      return result;
+      // Modified 2026-11-24: use the canonical CP matrix in both overloads.
+      // The previous exp(-i*theta) made block synthesis implement CP(-theta).
+      return getGateMat(qop_t{op_name, parameters}, i);
     }else if(op_name == "swap" && parameters.size() == 0 && op.getOperands().size() == 2 ){
       Eigen::MatrixXcd result = Eigen::MatrixXcd::Zero(4, 4);
       result << 1.0, 0.0, 0.0, 0.0,
@@ -834,4 +829,3 @@ Eigen::MatrixXcd getGateMat(mlir::quantum::ValueSemanticsInstOp &op,int i){
 
 }
 } // namespace
-

@@ -138,6 +138,14 @@ antlrcpp::Any qasm3_visitor::visitBranchingStatement(
 
   // Get the conditional expression
   auto conditional_expr = context->booleanExpression();
+  // Modified for the correctness revision: reject unimplemented comparisons.
+  if (auto *comparison = conditional_expr->comparsionExpression()) {
+    if (auto *relation = comparison->relationalOperator()) {
+      const auto spelling = relation->getText();
+      if (spelling != "==" && spelling != "!=")
+        throw std::runtime_error("Unsupported classical predicate: " + spelling);
+    }
+  }
   // Only consider this codegen strategy if requested (for specific qrt/qpu
   // target)
   if (enable_nisq_ifelse) {

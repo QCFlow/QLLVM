@@ -27,6 +27,9 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
+// Modified for the QLLVM correctness revision (2026): preserve parameter and control semantics.
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -142,11 +145,61 @@ int getQubitIndex(const Value* V, const QubitMap& qubitMap) {
   return -1;
 }
 
-// Extract double from ConstantFP or return 0
+// Evaluate supported compile-time QIR expressions. Unresolved values are errors.
 double getConstantDouble(const Value* V) {
-  if (const ConstantFP* CF = dyn_cast<ConstantFP>(V))
-    return CF->getValueAPF().convertToDouble();
-  return 0.0;
+  if (const ConstantFP* CF = dyn_cast<ConstantFP>(V)) {
+    double result = CF->getValueAPF().convertToDouble();
+    if (!std::isfinite(result)) throw std::runtime_error("Non-finite constant QASM gate parameter");
+    return result;
+  }
+  if (const ConstantInt* CI = dyn_cast<ConstantInt>(V))
+    return double(CI->getSExtValue());
+  if (const CastInst* cast = dyn_cast<CastInst>(V)) {
+    // Modified November 2026: casts change numeric values; stripping them can
+    // turn uitofp(-1) into the signed value -1 or ignore FP truncation entirely.
+    if (const auto* operand = dyn_cast<Constant>(cast->getOperand(0))) {
+      if (const Constant* folded = ConstantFoldCastOperand(
+              cast->getOpcode(), const_cast<Constant*>(operand),
+              cast->getType(), cast->getModule()->getDataLayout()))
+        return getConstantDouble(folded);
+    }
+    throw std::runtime_error("Unsupported nonconstant cast in QASM gate parameter");
+  }
+  if (const BinaryOperator* operation = dyn_cast<BinaryOperator>(V)) {
+    const double a = getConstantDouble(operation->getOperand(0));
+    const double b = getConstantDouble(operation->getOperand(1));
+    double result = 0;
+    switch (operation->getOpcode()) {
+      case Instruction::FAdd: result = a + b; break;
+      case Instruction::FSub: result = a - b; break;
+      case Instruction::FMul: result = a * b; break;
+      case Instruction::FDiv:
+        if (b == 0) throw std::runtime_error("Division by zero in QASM gate parameter");
+        result = a / b; break;
+      default: throw std::runtime_error("Unsupported constant QIR arithmetic");
+    }
+    if (!std::isfinite(result)) throw std::runtime_error("Non-finite QASM gate parameter");
+    return result;
+  }
+  if (const CallInst* call = dyn_cast<CallInst>(V)) {
+    const Function* function = call->getCalledFunction();
+    if (function && call->getNumArgOperands() == 1) {
+      const double x = getConstantDouble(call->getArgOperand(0));
+      const StringRef name = function->getName();
+      double result;
+      if (name == "sin" || name.startswith("llvm.sin.")) result = std::sin(x);
+      else if (name == "cos" || name.startswith("llvm.cos.")) result = std::cos(x);
+      else if (name == "sqrt" || name.startswith("llvm.sqrt.")) result = std::sqrt(x);
+      else if (name == "exp" || name.startswith("llvm.exp.")) result = std::exp(x);
+      else if (name == "log" || name.startswith("llvm.log.")) result = std::log(x);
+      else if (name == "log2" || name.startswith("llvm.log2.")) result = std::log2(x);
+      else if (name == "atan") result = std::atan(x);
+      else throw std::runtime_error("Unsupported QIR gate-parameter function: " + name.str());
+      if (!std::isfinite(result)) throw std::runtime_error("Non-finite QASM gate parameter");
+      return result;
+    }
+  }
+  throw std::runtime_error("Unresolved symbolic/runtime parameter in QASM export");
 }
 
 /// Memref lowering uses insertvalue/extractvalue chains ending at alloca i1[N].
@@ -406,6 +459,27 @@ bool emitInstruction(CallInst* CI, const QubitMap& qubitMap,
   StringRef name = Callee->getName();
 
   if (!name.startswith("__quantum__qis__")) return true;
+  for (const auto &argument : CI->args()) {
+    if (argument->getType()->isPointerTy() && getQubitIndex(argument.get(), qubitMap) < 0) {
+      llvm::errs() << "QASM2 export: unresolved quantum operand in " << name << "\n";
+      return false;
+    }
+  }
+
+  // Modified 2026-11-24: retain barriers from direct object imports.
+  if (name == "__quantum__qis__barrier") {
+    if (!ifPrefix.empty()) out << ifPrefix;
+    out << "barrier ";
+    for (unsigned i = 0; i < CI->arg_size(); ++i) {
+      int q = getQubitIndex(CI->getArgOperand(i), qubitMap);
+      if (q < 0) return false;
+      if (i) out << ",";
+      out << "q[" << q << "]";
+    }
+    out << ";\n";
+    return true;
+  }
+
 
   auto prependIf = [&]() {
     if (!ifPrefix.empty()) out << ifPrefix;
@@ -567,7 +641,8 @@ bool emitInstruction(CallInst* CI, const QubitMap& qubitMap,
     return q >= 0;
   }
 
-  return true;  // unknown gate, skip
+  if (name == "__quantum__qis__igate" || name == "__quantum__qis__id") return true;
+  throw std::runtime_error("Unsupported QIS instruction in QASM export: " + name.str());
 }
 
 }  // namespace
@@ -601,7 +676,7 @@ std::string QirToQasmTranslator::translate(llvm::Module* module,
           measureCount++;
       }
     }
-    out << "creg c[" << measureCount << "];\n";
+    if (measureCount > 0) out << "creg c[" << measureCount << "];\n";
   } else {
     for (unsigned i = 0; i < classicLayout.order.size(); ++i)
       out << "creg " << classicLayout.name(i) << "[" << classicLayout.bitWidth[i]
@@ -632,6 +707,12 @@ std::string QirToQasmTranslator::translate(llvm::Module* module,
     }
   }
 
+  for (BasicBlock &BB : *Kernel) {
+    if (auto *branch = dyn_cast<BranchInst>(BB.getTerminator()))
+      if (branch->isConditional() && !classicalIfTests.count(&BB))
+        throw std::runtime_error("Unsupported classical control-flow pattern in QASM export");
+  }
+
   const ClassicalLayout *layoutPtr =
       classicLayout.empty() ? nullptr : &classicLayout;
 
@@ -643,7 +724,7 @@ std::string QirToQasmTranslator::translate(llvm::Module* module,
         continue;
       if (skipCallsInThen.count(&I))
         continue;
-      emitInstruction(CI, qubitMap, out, measureCount, layoutPtr, "");
+      if (!emitInstruction(CI, qubitMap, out, measureCount, layoutPtr, "")) return "";
     }
     auto ifIt = classicalIfTests.find(&BB);
     if (ifIt != classicalIfTests.end()) {
@@ -658,8 +739,8 @@ std::string QirToQasmTranslator::translate(llvm::Module* module,
         if (auto *CI = dyn_cast<CallInst>(&I)) {
           Function *F = CI->getCalledFunction();
           if (F && F->getName().startswith("__quantum__qis__"))
-            emitInstruction(CI, qubitMap, out, measureCount, layoutPtr,
-                            prefix);
+            if (!emitInstruction(CI, qubitMap, out, measureCount, layoutPtr,
+                                 prefix)) return "";
         }
       }
     }

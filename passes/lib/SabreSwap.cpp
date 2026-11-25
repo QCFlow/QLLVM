@@ -12,12 +12,14 @@
  * that they have been altered from the originals.
  */
 /*******************************************************************************
- * SabreSwap implementation - basic heuristic
+ * Modified November 2026: lookahead/decay scoring, seeded trials and local tabu.
+ * SabreSwap implementation
  *******************************************************************************/
 
 #include "qllvm/passes/SabreSwap.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <random>
 #include <set>
@@ -28,27 +30,28 @@ namespace sabre {
 SabreSwap::SabreSwap(const CouplingMap& coupling, const SabreOptions& opts)
     : coupling_(coupling), opts_(opts) {}
 
-double SabreSwap::scoreSwap(int v0, int v1, const std::vector<int>& layout,
-                            const std::vector<int>& frontLayerGates,
-                            const Circuit& circ) {
-  std::vector<int> newLayout = layout;
-  std::swap(newLayout[v0], newLayout[v1]);
-
-  double cost = 0;
-  for (int gi : frontLayerGates) {
-    const Gate& g = circ.gates[gi];
-    if (g.qubits.size() < 2) continue;
-    int p0 = newLayout[g.qubits[0]];
-    int p1 = newLayout[g.qubits[1]];
-    int d = coupling_.distance(p0, p1);
-    if (d < 0) return std::numeric_limits<double>::max();
-    cost += d;
-  }
-  return cost;
-}
-
 SabreSwapResult SabreSwap::run(const Circuit& circ,
                                 const std::vector<int>& initialLayout) {
+  SabreSwapResult best;
+  size_t bestCount = std::numeric_limits<size_t>::max();
+  for (int trial = 0; trial < std::max(1, opts_.swapTrials); ++trial) {
+    auto candidate = runTrial(circ, initialLayout,
+        (opts_.seed ? *opts_.seed : 42) + 104729u * trial);
+    bool complete = std::all_of(candidate.layoutBeforeGate.begin(),
+        candidate.layoutBeforeGate.end(), [](const auto& v) { return !v.empty(); });
+    if (complete && candidate.insertions.size() < bestCount) {
+      bestCount = candidate.insertions.size();
+      best = std::move(candidate);
+    }
+  }
+  if (bestCount == std::numeric_limits<size_t>::max())
+    return runTrial(circ, initialLayout, opts_.seed ? *opts_.seed : 42);
+  return best;
+}
+
+SabreSwapResult SabreSwap::runTrial(const Circuit& circ,
+                                     const std::vector<int>& initialLayout,
+                                     unsigned seed) {
   SabreSwapResult result;
   result.finalLayout = initialLayout;
   result.layoutBeforeGate.assign(circ.gates.size(), {});
@@ -64,7 +67,9 @@ SabreSwapResult SabreSwap::run(const Circuit& circ,
 
   std::vector<int> currentValueIndex(circ.numQubits, -1);
 
-  std::mt19937 rng(opts_.seed ? *opts_.seed : 42);
+  std::mt19937 rng(seed);
+  std::vector<double> decay(circ.numQubits, 1.0);
+  size_t swapsSinceProgress = 0;
 
   size_t executedCount = 0;
   size_t num2qGates = 0;
@@ -125,7 +130,14 @@ SabreSwapResult SabreSwap::run(const Circuit& circ,
         break;
       }
     }
-    if (routed) { swapIterations = 0; continue; }
+    if (routed) {
+      swapIterations = 0;
+      swapsSinceProgress = 0;
+      seenLayouts.clear();
+      seenLayouts.insert(layout);
+      std::fill(decay.begin(), decay.end(), 1.0);
+      continue;
+    }
 
     std::vector<int> twoQInFront;
     for (int gi : frontLayer) {
@@ -159,82 +171,84 @@ SabreSwapResult SabreSwap::run(const Circuit& circ,
 
     if (candidateSwaps.empty()) break;
 
-    double bestScore = std::numeric_limits<double>::max();
-    std::vector<std::pair<int, int>> bestCandidates;
-    std::vector<std::pair<std::pair<int, int>, double>> allScored;
-    for (const auto& sw : candidateSwaps) {
-      double sc = scoreSwap(sw.first, sw.second, layout, twoQInFront, circ);
-      allScored.push_back({sw, sc});
-      if (sc < bestScore) {
-        bestScore = sc;
-        bestCandidates = {{sw.first, sw.second}};
-      } else if (sc == bestScore) {
-        bestCandidates.push_back({sw.first, sw.second});
-      }
-    }
-
-    auto applySwap = [&layout](int a, int b) {
-      std::vector<int> next = layout;
-      std::swap(next[a], next[b]);
-      return next;
-    };
-
-    int v0 = -1, v1 = -1;
-    std::vector<int> nextLayout;
-
-    for (const auto& pick : bestCandidates) {
-      nextLayout = applySwap(pick.first, pick.second);
-      if (seenLayouts.find(nextLayout) == seenLayouts.end()) {
-        v0 = pick.first;
-        v1 = pick.second;
-        break;
-      }
-    }
-
-    if (v0 < 0) {
-      std::sort(allScored.begin(), allScored.end(),
-                [](const auto& a, const auto& b) { return a.second < b.second; });
-      for (const auto& [sw, sc] : allScored) {
-        if (sc > bestScore * 1.5) break;
-        nextLayout = applySwap(sw.first, sw.second);
-        if (seenLayouts.find(nextLayout) == seenLayouts.end()) {
-          v0 = sw.first;
-          v1 = sw.second;
-          break;
+    // Look ahead through dependency layers, skipping one-qubit gates.
+    // Routing preserves the original QIR call order; future layers influence
+    // the score without changing the runtime schedule or SSA dominance.
+    std::vector<int> extended;
+    std::vector<int> degree = inDegree;
+    std::vector<bool> visited = executed;
+    std::vector<int> layer = frontLayer;
+    while (!layer.empty() && extended.size() < 20) {
+      std::vector<int> next;
+      for (int gi : layer) {
+        visited[gi] = true;
+        for (int successor : circ.successors[gi]) {
+          if (--degree[successor] == 0 && !visited[successor])
+            next.push_back(successor);
         }
       }
+      for (int gi : next)
+        if (circ.gates[gi].qubits.size() >= 2 && extended.size() < 20)
+          extended.push_back(gi);
+      layer = std::move(next);
     }
-
-    // Full-layout tabu can strand: all top swaps may revisit prior permutations
-    // while routing is still required. Take a random feasible swap to explore.
-    if (v0 < 0) {
-      std::vector<std::pair<int, int>> finiteSwaps;
-      finiteSwaps.reserve(allScored.size());
-      for (const auto& [sw, sc] : allScored) {
-        if (sc < std::numeric_limits<double>::max()) finiteSwaps.push_back(sw);
+    auto distanceCost = [&](int a, int b, const std::vector<int>& gates) {
+      if (gates.empty()) return 0.0;
+      double total = 0;
+      for (int gi : gates) {
+        const Gate& gate = circ.gates[gi];
+        auto mapped = [&](int v) {
+          return layout[v == a ? b : v == b ? a : v];
+        };
+        int distance = coupling_.distance(mapped(gate.qubits[0]),
+                                          mapped(gate.qubits[1]));
+        if (distance < 0) return std::numeric_limits<double>::max();
+        total += distance;
       }
-      if (!finiteSwaps.empty()) {
-        std::uniform_int_distribution<size_t> pick(0, finiteSwaps.size() - 1);
-        auto sw = finiteSwaps[pick(rng)];
-        v0 = sw.first;
-        v1 = sw.second;
+      return total / gates.size();
+    };
+    double bestScore = std::numeric_limits<double>::max();
+    std::vector<std::pair<int, int>> bestCandidates;
+    // A bounded escape chooses a shortest-path step for the first blocked
+    // interaction. It guarantees eventual progress on a connected graph.
+    bool escape = swapsSinceProgress >= 5 * (size_t)circ.numQubits;
+    for (const auto& sw : candidateSwaps) {
+      std::vector<int> next = layout;
+      std::swap(next[sw.first], next[sw.second]);
+      if (!escape && seenLayouts.count(next)) continue;
+      double score;
+      if (escape) {
+        const Gate& gate = circ.gates[minFrontGi];
+        int before = coupling_.distance(layout[gate.qubits[0]], layout[gate.qubits[1]]);
+        int after = coupling_.distance(next[gate.qubits[0]], next[gate.qubits[1]]);
+        if (after >= before) continue;
+        score = after;
+      } else {
+        score = distanceCost(sw.first, sw.second, twoQInFront);
+        if (opts_.heuristic != "basic")
+          score += 0.5 * distanceCost(sw.first, sw.second, extended);
+        if (opts_.heuristic == "decay")
+          score *= std::max(decay[sw.first], decay[sw.second]);
+      }
+      if (score < bestScore - 1e-10) {
+        bestScore = score;
+        bestCandidates = {sw};
+      } else if (std::abs(score - bestScore) <= 1e-10) {
+        bestCandidates.push_back(sw);
       }
     }
-
-    // scoreSwap uses summed distances on the front layer; a swap can be needed
-    // even when every candidate scores +∞ (e.g. lookahead pessimistic on large
-    // maps). Any connected SWAP along the blocking CX qubits may still make
-    // progress toward adjacency — pick one at random when no finite score exists.
-    if (v0 < 0 && !candidateSwaps.empty()) {
-      std::vector<std::pair<int, int>> allCand(candidateSwaps.begin(),
-                                               candidateSwaps.end());
-      std::uniform_int_distribution<size_t> pick(0, allCand.size() - 1);
-      auto sw = allCand[pick(rng)];
-      v0 = sw.first;
-      v1 = sw.second;
+    if (bestCandidates.empty()) {
+      seenLayouts.clear();
+      swapsSinceProgress = 5 * (size_t)circ.numQubits;
+      continue;
     }
-
-    if (v0 < 0) break;
+    std::uniform_int_distribution<size_t> pick(0, bestCandidates.size()-1);
+    auto chosen = bestCandidates[pick(rng)];
+    int v0 = chosen.first, v1 = chosen.second;
+    ++swapsSinceProgress;
+    if (swapsSinceProgress % 5 == 0) std::fill(decay.begin(), decay.end(), 1.0);
+    decay[v0] += 0.001;
+    decay[v1] += 0.001;
 
     std::vector<int> layoutBeforeThisSwap = layout;
     std::swap(layout[v0], layout[v1]);

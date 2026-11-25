@@ -12,6 +12,7 @@
  * that they have been altered from the originals.
  */
 /*******************************************************************************
+ * Modified November 2026: seeded independent trials and complete-route selection.
  * SabreLayout - bidirectional layout selection
  *******************************************************************************/
 
@@ -74,12 +75,16 @@ std::vector<int> SabreLayout::run(const Circuit& circ) {
   size_t bestSwaps = std::numeric_limits<size_t>::max();
 
   Circuit revCirc = reverseCircuit(circ);
-  SabreSwap swap(coupling_, opts_);
+
 
   std::vector<int> physOrder(numPhys);
   for (int i = 0; i < numPhys; i++) physOrder[i] = i;
 
-  for (int trial = 0; trial < opts_.layoutTrials; trial++) {
+  for (int trial = 0; trial < std::max(1, opts_.layoutTrials); trial++) {
+    SabreOptions trialOptions = opts_;
+    trialOptions.seed = (opts_.seed ? *opts_.seed : 42) + 1009u * trial;
+    trialOptions.swapTrials = 1;
+    SabreSwap swap(coupling_, trialOptions);
     std::vector<int> layout(circ.numQubits);
     std::shuffle(physOrder.begin(), physOrder.end(), rng);
     for (int i = 0; i < circ.numQubits && i < numPhys; i++)
@@ -93,8 +98,11 @@ std::vector<int> SabreLayout::run(const Circuit& circ) {
       layout = revResult.finalLayout;
     }
 
-    auto finalResult = swap.run(circ, layout);
-    if (finalResult.insertions.size() < bestSwaps) {
+    SabreSwap finalSwap(coupling_, opts_);
+    auto finalResult = finalSwap.run(circ, layout);
+    bool complete = std::all_of(finalResult.layoutBeforeGate.begin(),
+        finalResult.layoutBeforeGate.end(), [](const auto& v) { return !v.empty(); });
+    if (complete && finalResult.insertions.size() < bestSwaps) {
       bestSwaps = finalResult.insertions.size();
       // `swap.run` does not mutate `layout`; it is still the initial mapping
       // for this scoring forward pass. SabrePass must receive that same

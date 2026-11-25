@@ -1104,7 +1104,7 @@ antlrcpp::Any qasm3_expression_generator::visitExpressionTerminator(
       } else if (math_func->getText() == "exp") {
         createOp<mlir::ExpOp>(location, arg);
       } else if (math_func->getText() == "ln") {
-        createOp<mlir::Log2Op>(location, arg);
+        createOp<mlir::LogOp>(location, arg);
       } else if (math_func->getText() == "sqrt") {
         createOp<mlir::SqrtOp>(location, arg);
       } else {

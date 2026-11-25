@@ -3488,7 +3488,7 @@ void DecomposemultiPass::runOnOperation() {
       decompose_cy_gate(op,deadOps);
     }else if(inst_name == "cu3" && op.getOperands().size() == 5){
       decompose_cu3_gate(op,deadOps);
-    }else if(inst_name == "cu1" && op.getOperands().size() == 3){
+    }else if((inst_name == "cu1" || inst_name == "cp") && op.getOperands().size() == 3){
       // std::cout << "decompose_cu1_gate: " << inst_name << std::endl;
       decompose_cu1_gate(op,deadOps);
     }else if(inst_name == "cu" && op.getOperands().size() == 6){

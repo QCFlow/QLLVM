@@ -12,6 +12,7 @@
  * that they have been altered from the originals.
  */
 /*******************************************************************************
+ * Modified November 2026: effective search controls and placement reporting.
  * SABRE pass options - coupling map, heuristic, trial counts
  *******************************************************************************/
 #pragma once
@@ -28,12 +29,12 @@ struct SabreOptions {
   std::vector<std::pair<int, int>> couplingEdges;
   std::optional<std::vector<int>> initialLayout;
   std::string kernelName;
-  /// Modified 2026-11-20: declaration required by the existing CLI.
+  /// Optional JSON artifact describing the actual initial/final placement.
   std::string reportPath;
-  std::string heuristic = "basic";
+  std::string heuristic = "decay";
   int maxIterations = 3;
-  int layoutTrials = 1;
-  int swapTrials = 1;
+  int layoutTrials = 5;
+  int swapTrials = 5;
   std::optional<unsigned> seed;
   /// After SABRE, rewrite QIR loads so gates use physical qubit indices.
   bool applyPhysicalLayoutToQir = true;

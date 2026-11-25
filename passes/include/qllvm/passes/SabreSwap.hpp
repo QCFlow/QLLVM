@@ -12,6 +12,7 @@
  * that they have been altered from the originals.
  */
 /*******************************************************************************
+ * Modified November 2026: deterministic multiple routing trials.
  * SabreSwap: SWAP-based routing for coupling map
  *******************************************************************************/
 #pragma once
@@ -58,9 +59,8 @@ public:
 private:
   const CouplingMap& coupling_;
   SabreOptions opts_;
-  double scoreSwap(int v0, int v1, const std::vector<int>& layout,
-                  const std::vector<int>& frontLayerGates,
-                  const Circuit& circ);
+  SabreSwapResult runTrial(const Circuit& circ,
+                           const std::vector<int>& initialLayout, unsigned seed);
 };
 
 }  // namespace sabre

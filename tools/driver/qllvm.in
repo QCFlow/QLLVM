@@ -735,11 +735,25 @@ def main(argv=None):
 
         def mpi_flags(flag):
             try:
-                return subprocess.check_output([mpi_wrapper, flag], text=True).strip().split()
+                raw = subprocess.check_output(
+                    [mpi_wrapper, flag], text=True, stderr=subprocess.DEVNULL).strip().split()
+                # MPICH -compile_info/-link_info prepend the host compiler name.
+                if raw and not raw[0].startswith('-'):
+                    raw = raw[1:]
+                return raw
             except Exception:
                 return []
 
-        return mpi_wrapper, mpi_flags('--showme:compile'), mpi_flags('--showme:link')
+        compile_flags = mpi_flags('--showme:compile')
+        link_flags = mpi_flags('--showme:link')
+        # MPICH / Intel MPI do not implement OpenMPI --showme.
+        if not compile_flags:
+            compile_flags = mpi_flags('-compile_info') or mpi_flags('-show')
+        if not link_flags:
+            link_flags = mpi_flags('-link_info') or mpi_flags('-show')
+        # Drop linker-only bits so flags can be passed to clang++ -S -emit-llvm.
+        compile_flags = [f for f in compile_flags if not f.startswith(('-Wl', '-L', '-l'))]
+        return mpi_wrapper, compile_flags, link_flags
 
     def _parse_cuda_options(_shutil):
         cuda_arch = 'sm_75'
